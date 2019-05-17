@@ -40,7 +40,7 @@
 static const uint32_t kNumBindingsInSet = 2;
 
 // Implementation for Descriptor Set Manager class
-GpuDescriptorSetManager::GpuDescriptorSetManager(CoreChecks *dev_data) { dev_data_ = dev_data; }
+GpuDescriptorSetManager::GpuDescriptorSetManager(GpuVal *dev_data) { dev_data_ = dev_data; }
 
 GpuDescriptorSetManager::~GpuDescriptorSetManager() {
     for (auto &pool : desc_pool_map_) {
@@ -187,14 +187,14 @@ static VKAPI_ATTR void VKAPI_CALL gpuVkCmdCopyBuffer(VkCommandBuffer commandBuff
     DispatchCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, regionCount, pRegions);
 }
 
-VkResult CoreChecks::GpuInitializeVma() {
+VkResult GpuVal::GpuInitializeVma() {
     VmaVulkanFunctions functions;
     VmaAllocatorCreateInfo allocatorInfo = {};
     allocatorInfo.device = device;
     ValidationObject *device_object = GetLayerDataPtr(get_dispatch_key(allocatorInfo.device), layer_data_map);
     ValidationObject *validation_data = GetValidationObject(device_object->object_dispatch, LayerObjectTypeCoreValidation);
-    CoreChecks *core_checks = static_cast<CoreChecks *>(validation_data);
-    allocatorInfo.physicalDevice = core_checks->physical_device;
+    GpuVal *gpu_val = static_cast<GpuVal *>(validation_data);
+    allocatorInfo.physicalDevice = gpu_val->physical_device;
 
     functions.vkGetPhysicalDeviceProperties = (PFN_vkGetPhysicalDeviceProperties)gpuVkGetPhysicalDeviceProperties;
     functions.vkGetPhysicalDeviceMemoryProperties = (PFN_vkGetPhysicalDeviceMemoryProperties)gpuVkGetPhysicalDeviceMemoryProperties;
@@ -219,14 +219,14 @@ VkResult CoreChecks::GpuInitializeVma() {
 }
 
 // Convenience function for reporting problems with setting up GPU Validation.
-void CoreChecks::ReportSetupProblem(VkDebugReportObjectTypeEXT object_type, uint64_t object_handle,
+void GpuVal::ReportSetupProblem(VkDebugReportObjectTypeEXT object_type, uint64_t object_handle,
                                     const char *const specific_message) {
     log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, object_type, object_handle, "UNASSIGNED-GPU-Assisted Validation Error. ",
             "Detail: (%s)", specific_message);
 }
 
 // Turn on necessary device features.
-void CoreChecks::GpuPreCallRecordCreateDevice(VkPhysicalDevice gpu, std::unique_ptr<safe_VkDeviceCreateInfo> &create_info,
+void GpuVal::GpuPreCallRecordCreateDevice(VkPhysicalDevice gpu, std::unique_ptr<safe_VkDeviceCreateInfo> &create_info,
                                               VkPhysicalDeviceFeatures *supported_features) {
     if (supported_features->fragmentStoresAndAtomics || supported_features->vertexPipelineStoresAndAtomics) {
         VkPhysicalDeviceFeatures new_features = {};
@@ -241,7 +241,7 @@ void CoreChecks::GpuPreCallRecordCreateDevice(VkPhysicalDevice gpu, std::unique_
 }
 
 // Perform initializations that can be done at Create Device time.
-void CoreChecks::GpuPostCallRecordCreateDevice(const CHECK_ENABLED *enables) {
+void GpuVal::GpuPostCallRecordCreateDevice(const CHECK_ENABLED *enables) {
     // Set instance-level enables in device-enable data structure if using legacy settings
     enabled.gpu_validation = enables->gpu_validation;
     enabled.gpu_validation_reserve_binding_slot = enables->gpu_validation_reserve_binding_slot;
@@ -326,7 +326,7 @@ void CoreChecks::GpuPostCallRecordCreateDevice(const CHECK_ENABLED *enables) {
 }
 
 // Clean up device-related resources
-void CoreChecks::GpuPreCallRecordDestroyDevice() {
+void GpuVal::GpuPreCallRecordDestroyDevice() {
     if (gpu_validation_state->barrier_command_buffer) {
         DispatchFreeCommandBuffers(device, gpu_validation_state->barrier_command_pool, 1,
                                    &gpu_validation_state->barrier_command_buffer);
@@ -351,7 +351,7 @@ void CoreChecks::GpuPreCallRecordDestroyDevice() {
 }
 
 // Modify the pipeline layout to include our debug descriptor set and any needed padding with the dummy descriptor set.
-bool CoreChecks::GpuPreCallCreatePipelineLayout(const VkPipelineLayoutCreateInfo *pCreateInfo,
+bool GpuVal::GpuPreCallCreatePipelineLayout(const VkPipelineLayoutCreateInfo *pCreateInfo,
                                                 const VkAllocationCallbacks *pAllocator, VkPipelineLayout *pPipelineLayout,
                                                 std::vector<VkDescriptorSetLayout> *new_layouts,
                                                 VkPipelineLayoutCreateInfo *modified_create_info) {
@@ -386,7 +386,7 @@ bool CoreChecks::GpuPreCallCreatePipelineLayout(const VkPipelineLayoutCreateInfo
 }
 
 // Clean up GPU validation after the CreatePipelineLayout call is made
-void CoreChecks::GpuPostCallCreatePipelineLayout(VkResult result) {
+void GpuVal::GpuPostCallCreatePipelineLayout(VkResult result) {
     // Clean up GPU validation
     if (result != VK_SUCCESS) {
         ReportSetupProblem(VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_EXT, HandleToUint64(device),
@@ -396,7 +396,7 @@ void CoreChecks::GpuPostCallCreatePipelineLayout(VkResult result) {
 }
 
 // Free the device memory and descriptor set associated with a command buffer.
-void CoreChecks::GpuResetCommandBuffer(const VkCommandBuffer commandBuffer) {
+void GpuVal::GpuResetCommandBuffer(const VkCommandBuffer commandBuffer) {
     if (gpu_validation_state->aborted) {
         return;
     }
@@ -416,7 +416,7 @@ void CoreChecks::GpuResetCommandBuffer(const VkCommandBuffer commandBuffer) {
 }
 
 // Just gives a warning about a possible deadlock.
-void CoreChecks::GpuPreCallValidateCmdWaitEvents(VkPipelineStageFlags sourceStageMask) {
+void GpuVal::GpuPreCallValidateCmdWaitEvents(VkPipelineStageFlags sourceStageMask) {
     if (sourceStageMask & VK_PIPELINE_STAGE_HOST_BIT) {
         ReportSetupProblem(VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_EXT, HandleToUint64(device),
                            "CmdWaitEvents recorded with VK_PIPELINE_STAGE_HOST_BIT set. "
@@ -428,7 +428,7 @@ void CoreChecks::GpuPreCallValidateCmdWaitEvents(VkPipelineStageFlags sourceStag
 // Examine the pipelines to see if they use the debug descriptor set binding index.
 // If any do, create new non-instrumented shader modules and use them to replace the instrumented
 // shaders in the pipeline.  Return the (possibly) modified create infos to the caller.
-std::vector<safe_VkGraphicsPipelineCreateInfo> CoreChecks::GpuPreCallRecordCreateGraphicsPipelines(
+std::vector<safe_VkGraphicsPipelineCreateInfo> GpuVal::GpuPreCallRecordCreateGraphicsPipelines(
     VkPipelineCache pipelineCache, uint32_t count, const VkGraphicsPipelineCreateInfo *pCreateInfos,
     const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines, std::vector<std::unique_ptr<PIPELINE_STATE>> &pipe_state) {
     std::vector<safe_VkGraphicsPipelineCreateInfo> new_pipeline_create_infos;
@@ -477,7 +477,7 @@ std::vector<safe_VkGraphicsPipelineCreateInfo> CoreChecks::GpuPreCallRecordCreat
 //     - Destroy it since it has been bound into the pipeline by now.  This is our only chance to delete it.
 //   - Track the shader in the shader_map
 //   - Save the shader binary if it contains debug code
-void CoreChecks::GpuPostCallRecordCreateGraphicsPipelines(const uint32_t count, const VkGraphicsPipelineCreateInfo *pCreateInfos,
+void GpuVal::GpuPostCallRecordCreateGraphicsPipelines(const uint32_t count, const VkGraphicsPipelineCreateInfo *pCreateInfos,
                                                           const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines) {
     for (uint32_t pipeline = 0; pipeline < count; ++pipeline) {
         auto pipeline_state = GetPipelineState(pPipelines[pipeline]);
@@ -512,7 +512,7 @@ void CoreChecks::GpuPostCallRecordCreateGraphicsPipelines(const uint32_t count, 
 }
 
 // Remove all the shader trackers associated with this destroyed pipeline.
-void CoreChecks::GpuPreCallRecordDestroyPipeline(const VkPipeline pipeline) {
+void GpuVal::GpuPreCallRecordDestroyPipeline(const VkPipeline pipeline) {
     for (auto it = gpu_validation_state->shader_map.begin(); it != gpu_validation_state->shader_map.end();) {
         if (it->second.pipeline == pipeline) {
             it = gpu_validation_state->shader_map.erase(it);
@@ -523,7 +523,7 @@ void CoreChecks::GpuPreCallRecordDestroyPipeline(const VkPipeline pipeline) {
 }
 
 // Call the SPIR-V Optimizer to run the instrumentation pass on the shader.
-bool CoreChecks::GpuInstrumentShader(const VkShaderModuleCreateInfo *pCreateInfo, std::vector<unsigned int> &new_pgm,
+bool GpuVal::GpuInstrumentShader(const VkShaderModuleCreateInfo *pCreateInfo, std::vector<unsigned int> &new_pgm,
                                      uint32_t *unique_shader_id) {
     if (gpu_validation_state->aborted) return false;
     if (pCreateInfo->pCode[0] != spv::MagicNumber) return false;
@@ -555,7 +555,7 @@ bool CoreChecks::GpuInstrumentShader(const VkShaderModuleCreateInfo *pCreateInfo
 }
 
 // Create the instrumented shader data to provide to the driver.
-bool CoreChecks::GpuPreCallCreateShaderModule(const VkShaderModuleCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
+bool GpuVal::GpuPreCallCreateShaderModule(const VkShaderModuleCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
                                               VkShaderModule *pShaderModule, uint32_t *unique_shader_id,
                                               VkShaderModuleCreateInfo *instrumented_create_info,
                                               std::vector<unsigned int> *instrumented_pgm) {
@@ -875,7 +875,7 @@ static void GenerateSourceMessages(const std::vector<unsigned int> &pgm, const u
 // sure it is available when the pipeline is submitted.  (The ShaderModule tracking object also
 // keeps a copy, but it can be destroyed after the pipeline is created and before it is submitted.)
 //
-void CoreChecks::AnalyzeAndReportError(CMD_BUFFER_STATE *cb_node, VkQueue queue, uint32_t draw_index,
+void GpuVal::AnalyzeAndReportError(CMD_BUFFER_STATE *cb_node, VkQueue queue, uint32_t draw_index,
                                        uint32_t *const debug_output_buffer) {
     using namespace spvtools;
     const uint32_t total_words = debug_output_buffer[0];
@@ -926,7 +926,7 @@ void CoreChecks::AnalyzeAndReportError(CMD_BUFFER_STATE *cb_node, VkQueue queue,
 }
 
 // For the given command buffer, map its debug data buffers and read their contents for analysis.
-void CoreChecks::ProcessInstrumentationBuffer(VkQueue queue, CMD_BUFFER_STATE *cb_node) {
+void GpuVal::ProcessInstrumentationBuffer(VkQueue queue, CMD_BUFFER_STATE *cb_node) {
     auto gpu_buffer_list = gpu_validation_state->GetGpuBufferInfo(cb_node->commandBuffer);
     if (cb_node && cb_node->hasDrawCmd && gpu_buffer_list.size() > 0) {
         VkResult result;
@@ -946,7 +946,7 @@ void CoreChecks::ProcessInstrumentationBuffer(VkQueue queue, CMD_BUFFER_STATE *c
 }
 
 // For the given command buffer, map its debug data buffers and update the status of any update after bind descriptors
-void CoreChecks::UpdateInstrumentationBuffer(CMD_BUFFER_STATE *cb_node) {
+void GpuVal::UpdateInstrumentationBuffer(CMD_BUFFER_STATE *cb_node) {
     auto gpu_buffer_list = gpu_validation_state->GetGpuBufferInfo(cb_node->commandBuffer);
     uint32_t *pData;
     for (auto &buffer_info : gpu_buffer_list) {
@@ -965,7 +965,7 @@ void CoreChecks::UpdateInstrumentationBuffer(CMD_BUFFER_STATE *cb_node) {
 
 // Submit a memory barrier on graphics queues.
 // Lazy-create and record the needed command buffer.
-void CoreChecks::SubmitBarrier(VkQueue queue) {
+void GpuVal::SubmitBarrier(VkQueue queue) {
     uint32_t queue_family_index = GetQueueState(queue);
 
     // Pay attention only to queues that support graphics.
@@ -1033,7 +1033,7 @@ void CoreChecks::SubmitBarrier(VkQueue queue) {
     }
 }
 
-void CoreChecks::GpuPreCallRecordQueueSubmit(VkQueue queue, uint32_t submitCount, const VkSubmitInfo *pSubmits, VkFence fence) {
+void GpuVal::GpuPreCallRecordQueueSubmit(VkQueue queue, uint32_t submitCount, const VkSubmitInfo *pSubmits, VkFence fence) {
     for (uint32_t submit_idx = 0; submit_idx < submitCount; submit_idx++) {
         const VkSubmitInfo *submit = &pSubmits[submit_idx];
         for (uint32_t i = 0; i < submit->commandBufferCount; i++) {
@@ -1049,7 +1049,7 @@ void CoreChecks::GpuPreCallRecordQueueSubmit(VkQueue queue, uint32_t submitCount
 // Issue a memory barrier to make GPU-written data available to host.
 // Wait for the queue to complete execution.
 // Check the debug buffers for all the command buffers that were submitted.
-void CoreChecks::GpuPostCallQueueSubmit(VkQueue queue, uint32_t submitCount, const VkSubmitInfo *pSubmits, VkFence fence) {
+void GpuVal::GpuPostCallQueueSubmit(VkQueue queue, uint32_t submitCount, const VkSubmitInfo *pSubmits, VkFence fence) {
     if (gpu_validation_state->aborted) return;
 
     SubmitBarrier(queue);
@@ -1068,14 +1068,12 @@ void CoreChecks::GpuPostCallQueueSubmit(VkQueue queue, uint32_t submitCount, con
     }
 }
 
-void CoreChecks::GpuAllocateValidationResources(const VkCommandBuffer cmd_buffer, const VkPipelineBindPoint bind_point) {
+void GpuVal::GpuAllocateValidationResources(const VkCommandBuffer cmd_buffer, const VkPipelineBindPoint bind_point) {
     // Does GPUAV support VK_PIPELINE_BIND_POINT_RAY_TRACING_NV?
     if (bind_point != VK_PIPELINE_BIND_POINT_GRAPHICS && bind_point != VK_PIPELINE_BIND_POINT_COMPUTE) {
         return;
     }
     VkResult result;
-
-    if (!(enabled.gpu_validation)) return;
 
     if (gpu_validation_state->aborted) return;
 

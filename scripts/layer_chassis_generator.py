@@ -470,7 +470,7 @@ bool wrap_handles = false;
 #include "stateless_validation.h"
 #endif
 #if BUILD_CORE_VALIDATION
-#include "core_validation.h"
+#include "gpu_validation.h"
 #endif
 
 namespace vulkan_layer_chassis {
@@ -814,12 +814,12 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo *pCreat
     object_tracker->api_version = api_version;
 #endif
 #if BUILD_CORE_VALIDATION
-    auto core_checks = new CoreChecks;
+    auto gpu_val = new GpuVal;
     if (!local_disables.core_checks) {
-        local_object_dispatch.emplace_back(core_checks);
+        local_object_dispatch.emplace_back(gpu_val);
     }
-    core_checks->container_type = LayerObjectTypeCoreValidation;
-    core_checks->api_version = api_version;
+    gpu_val->container_type = LayerObjectTypeCoreValidation;
+    gpu_val->api_version = api_version;
 #endif
 
     // If handle wrapping is disabled via the ValidationFeatures extension, override build flag
@@ -873,12 +873,12 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo *pCreat
     parameter_validation->disabled = framework->disabled;
 #endif
 #if BUILD_CORE_VALIDATION
-    core_checks->report_data = framework->report_data;
-    core_checks->instance_dispatch_table = framework->instance_dispatch_table;
-    core_checks->instance = *pInstance;
-    core_checks->enabled = framework->enabled;
-    core_checks->disabled = framework->disabled;
-    core_checks->instance_state = core_checks;
+    gpu_val->report_data = framework->report_data;
+    gpu_val->instance_dispatch_table = framework->instance_dispatch_table;
+    gpu_val->instance = *pInstance;
+    gpu_val->enabled = framework->enabled;
+    gpu_val->disabled = framework->disabled;
+    gpu_val->instance_state = gpu_val;
 #endif
 
     for (auto intercept : framework->object_dispatch) {
@@ -1012,12 +1012,12 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const VkDevice
     }
 #endif
 #if BUILD_CORE_VALIDATION
-    auto core_checks = new CoreChecks;
-    core_checks->container_type = LayerObjectTypeCoreValidation;
-    core_checks->instance_state = reinterpret_cast<CoreChecks *>(
-        core_checks->GetValidationObject(instance_interceptor->object_dispatch, LayerObjectTypeCoreValidation));
+    auto gpu_val = new GpuVal;
+    gpu_val->container_type = LayerObjectTypeCoreValidation;
+    gpu_val->instance_state = reinterpret_cast<GpuVal *>(
+        gpu_val->GetValidationObject(instance_interceptor->object_dispatch, LayerObjectTypeCoreValidation));
     if (!instance_interceptor->disabled.core_checks) {
-        device_interceptor->object_dispatch.emplace_back(core_checks);
+        device_interceptor->object_dispatch.emplace_back(gpu_val);
     }
 #endif
 

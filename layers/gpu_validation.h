@@ -40,7 +40,7 @@ namespace cvdescriptorset {
 }  // namespace cvdescriptorset
 
 struct CMD_BUFFER_STATE;
-class CoreChecks;
+class GpuVal;
 
 class BASE_NODE {
 public:
@@ -270,12 +270,12 @@ struct ShaderTracker {
     std::vector<unsigned int> pgm;
 };
 
-std::shared_ptr<cvdescriptorset::DescriptorSetLayout const> const GetDescriptorSetLayout(CoreChecks const *, VkDescriptorSetLayout);
+std::shared_ptr<cvdescriptorset::DescriptorSetLayout const> const GetDescriptorSetLayout(GpuVal const *, VkDescriptorSetLayout);
 
 
 /////////////////////////////////////////////////////////////////////#include "descriptor_sets.h"
 
-class CoreChecks;
+class GpuVal;
 
 // Descriptor Data structures
 namespace cvdescriptorset {
@@ -458,7 +458,7 @@ namespace cvdescriptorset {
         virtual void WriteUpdate(const VkWriteDescriptorSet *, const uint32_t) { updated = true; };
         virtual void CopyUpdate(const Descriptor *) { updated = true; };
         void BindCommandBuffer(CMD_BUFFER_STATE *);
-        void UpdateDrawState(CoreChecks *, CMD_BUFFER_STATE *);
+        void UpdateDrawState(GpuVal *, CMD_BUFFER_STATE *);
         bool updated;  // Has descriptor been updated?
     };
 
@@ -479,7 +479,7 @@ namespace cvdescriptorset {
     class DescriptorSet : public BASE_NODE {
     public:
         DescriptorSet(const VkDescriptorSet, const VkDescriptorPool, const std::shared_ptr<DescriptorSetLayout const> &,
-            uint32_t variable_count, CoreChecks *);
+            uint32_t variable_count, GpuVal *);
         ~DescriptorSet();
         // A number of common Get* functions that return data based on layout from which this set was created
         uint32_t GetTotalDescriptorCount() const { return p_layout_->GetTotalDescriptorCount(); };
@@ -503,7 +503,7 @@ namespace cvdescriptorset {
         // Return unordered_set of all command buffers that this set is bound to
         std::unordered_set<CMD_BUFFER_STATE *> GetBoundCmdBuffers() const { return cb_bindings; }
         // Bind given cmd_buffer to this descriptor set and  update CB image layout map with image/imagesampler descriptor image layouts
-        void UpdateDrawState(CoreChecks *, CMD_BUFFER_STATE *, const std::map<uint32_t, descriptor_req> &);
+        void UpdateDrawState(GpuVal *, CMD_BUFFER_STATE *, const std::map<uint32_t, descriptor_req> &);
         void BindCommandBuffer(CMD_BUFFER_STATE *, const std::map<uint32_t, descriptor_req> &);
 
         // If given cmd_buffer is in the cb_bindings set, remove it
@@ -536,7 +536,7 @@ namespace cvdescriptorset {
         DESCRIPTOR_POOL_STATE *pool_state_;
         const std::shared_ptr<DescriptorSetLayout const> p_layout_;
         std::vector<std::unique_ptr<Descriptor>> descriptors_;
-        CoreChecks *device_data_;
+        GpuVal *device_data_;
         const VkPhysicalDeviceLimits limits_;
         uint32_t variable_count_;
     };
@@ -565,7 +565,7 @@ struct GpuBufferInfo {
 // as needed to satisfy requests for descriptor sets.
 class GpuDescriptorSetManager {
 public:
-    GpuDescriptorSetManager(CoreChecks *dev_data);
+    GpuDescriptorSetManager(GpuVal *dev_data);
     ~GpuDescriptorSetManager();
 
     VkResult GetDescriptorSets(uint32_t count, VkDescriptorPool *pool, std::vector<VkDescriptorSet> *desc_sets);
@@ -578,7 +578,7 @@ private:
         uint32_t used;
     };
 
-    CoreChecks *dev_data_;
+    GpuVal *dev_data_;
     std::unordered_map<VkDescriptorPool, struct PoolTracker> desc_pool_map_;
 };
 
@@ -720,7 +720,7 @@ struct create_shader_module_api_state {
 using std::unordered_map;
 struct GpuValidationState;
 
-class CoreChecks : public ValidationObject {
+class GpuVal : public ValidationObject {
    public:
     unordered_map<VkPipeline, std::unique_ptr<PIPELINE_STATE>> pipelineMap;
     unordered_map<VkShaderModule, std::unique_ptr<SHADER_MODULE_STATE>> shaderModuleMap;
@@ -740,7 +740,7 @@ class CoreChecks : public ValidationObject {
     PHYSICAL_DEVICE_STATE* physical_device_state;
 
     // Link for derived device objects back to their parent instance object
-    CoreChecks* instance_state;
+    GpuVal* instance_state;
 
     // Device specific data
     VkPhysicalDeviceProperties phys_dev_props = {};
@@ -935,4 +935,4 @@ class CoreChecks : public ValidationObject {
     void PreCallRecordCmdDispatch(VkCommandBuffer commandBuffer, uint32_t x, uint32_t y, uint32_t z);
     void PreCallRecordCmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset);
 
-};  // Class CoreChecks
+};  // Class GpuVal
