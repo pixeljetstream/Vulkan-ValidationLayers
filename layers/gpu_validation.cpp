@@ -220,14 +220,14 @@ VkResult GpuVal::GpuInitializeVma() {
 
 // Convenience function for reporting problems with setting up GPU Validation.
 void GpuVal::ReportSetupProblem(VkDebugReportObjectTypeEXT object_type, uint64_t object_handle,
-                                    const char *const specific_message) {
+                                const char *const specific_message) {
     log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, object_type, object_handle, "UNASSIGNED-GPU-Assisted Validation Error. ",
             "Detail: (%s)", specific_message);
 }
 
 // Turn on necessary device features.
 void GpuVal::GpuPreCallRecordCreateDevice(VkPhysicalDevice gpu, std::unique_ptr<safe_VkDeviceCreateInfo> &create_info,
-                                              VkPhysicalDeviceFeatures *supported_features) {
+                                          VkPhysicalDeviceFeatures *supported_features) {
     if (supported_features->fragmentStoresAndAtomics || supported_features->vertexPipelineStoresAndAtomics) {
         VkPhysicalDeviceFeatures new_features = {};
         if (create_info->pEnabledFeatures) {
@@ -351,10 +351,9 @@ void GpuVal::GpuPreCallRecordDestroyDevice() {
 }
 
 // Modify the pipeline layout to include our debug descriptor set and any needed padding with the dummy descriptor set.
-bool GpuVal::GpuPreCallCreatePipelineLayout(const VkPipelineLayoutCreateInfo *pCreateInfo,
-                                                const VkAllocationCallbacks *pAllocator, VkPipelineLayout *pPipelineLayout,
-                                                std::vector<VkDescriptorSetLayout> *new_layouts,
-                                                VkPipelineLayoutCreateInfo *modified_create_info) {
+bool GpuVal::GpuPreCallCreatePipelineLayout(const VkPipelineLayoutCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
+                                            VkPipelineLayout *pPipelineLayout, std::vector<VkDescriptorSetLayout> *new_layouts,
+                                            VkPipelineLayoutCreateInfo *modified_create_info) {
     if (gpu_validation_state->aborted) {
         return false;
     }
@@ -478,7 +477,7 @@ std::vector<safe_VkGraphicsPipelineCreateInfo> GpuVal::GpuPreCallRecordCreateGra
 //   - Track the shader in the shader_map
 //   - Save the shader binary if it contains debug code
 void GpuVal::GpuPostCallRecordCreateGraphicsPipelines(const uint32_t count, const VkGraphicsPipelineCreateInfo *pCreateInfos,
-                                                          const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines) {
+                                                      const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines) {
     for (uint32_t pipeline = 0; pipeline < count; ++pipeline) {
         auto pipeline_state = GetPipelineState(pPipelines[pipeline]);
         if (nullptr == pipeline_state) continue;
@@ -524,7 +523,7 @@ void GpuVal::GpuPreCallRecordDestroyPipeline(const VkPipeline pipeline) {
 
 // Call the SPIR-V Optimizer to run the instrumentation pass on the shader.
 bool GpuVal::GpuInstrumentShader(const VkShaderModuleCreateInfo *pCreateInfo, std::vector<unsigned int> &new_pgm,
-                                     uint32_t *unique_shader_id) {
+                                 uint32_t *unique_shader_id) {
     if (gpu_validation_state->aborted) return false;
     if (pCreateInfo->pCode[0] != spv::MagicNumber) return false;
 
@@ -556,9 +555,9 @@ bool GpuVal::GpuInstrumentShader(const VkShaderModuleCreateInfo *pCreateInfo, st
 
 // Create the instrumented shader data to provide to the driver.
 bool GpuVal::GpuPreCallCreateShaderModule(const VkShaderModuleCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
-                                              VkShaderModule *pShaderModule, uint32_t *unique_shader_id,
-                                              VkShaderModuleCreateInfo *instrumented_create_info,
-                                              std::vector<unsigned int> *instrumented_pgm) {
+                                          VkShaderModule *pShaderModule, uint32_t *unique_shader_id,
+                                          VkShaderModuleCreateInfo *instrumented_create_info,
+                                          std::vector<unsigned int> *instrumented_pgm) {
     bool pass = GpuInstrumentShader(pCreateInfo, *instrumented_pgm, unique_shader_id);
     if (pass) {
         instrumented_create_info->pCode = instrumented_pgm->data();
@@ -876,7 +875,7 @@ static void GenerateSourceMessages(const std::vector<unsigned int> &pgm, const u
 // keeps a copy, but it can be destroyed after the pipeline is created and before it is submitted.)
 //
 void GpuVal::AnalyzeAndReportError(CMD_BUFFER_STATE *cb_node, VkQueue queue, uint32_t draw_index,
-                                       uint32_t *const debug_output_buffer) {
+                                   uint32_t *const debug_output_buffer) {
     using namespace spvtools;
     const uint32_t total_words = debug_output_buffer[0];
     // A zero here means that the shader instrumentation didn't write anything.
