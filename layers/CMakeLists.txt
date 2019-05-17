@@ -198,10 +198,10 @@ set(CHASSIS_LIBRARY_FILES
     layer_chassis_dispatch.cpp)
 
 set(CORE_VALIDATION_LIBRARY_FILES
-    core_validation.cpp
+    gpu_validation_intercepts.cpp
     #drawdispatch.cpp
     #convert_to_renderpass2.cpp
-    descriptor_sets.cpp
+    #descriptor_sets.cpp
     #buffer_validation.cpp
     #shader_validation.cpp
     gpu_validation.cpp

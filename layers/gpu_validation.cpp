@@ -15,13 +15,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
+ * Author: Karl Schultz <karl@lunarg.com>
+ * Author: Tony Barbour <tony@LunarG.com>
+ * Author: Mark Lobodzinski <mark@lunarg.com>
  */
 
 // Allow use of STL min and max functions in Windows
 #define NOMINMAX
 
 #include "chassis.h"
-#include "core_validation.h"
 // This define indicates to build the VMA routines themselves
 #define VMA_IMPLEMENTATION
 // This define indicates that we will supply Vulkan function pointers at initialization
