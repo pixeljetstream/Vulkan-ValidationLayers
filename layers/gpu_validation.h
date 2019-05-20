@@ -537,6 +537,7 @@ class DescriptorSet : public BASE_NODE {
 };
 }  // namespace cvdescriptorset
 
+
 ////////////////////////////////////#include "gpu_validation.h"
 struct GpuDeviceMemoryBlock {
     VkBuffer buffer;
@@ -663,6 +664,7 @@ struct spirv_inst_iter {
 struct SHADER_MODULE_STATE {
     // The spirv image itself
     std::vector<uint32_t> words;
+    std::unordered_map<unsigned, unsigned> def_index;
     bool has_valid_spirv;
     VkShaderModule vk_shader_module;
     uint32_t gpu_validation_shader_id;
@@ -671,7 +673,9 @@ struct SHADER_MODULE_STATE {
         : words((uint32_t*)pCreateInfo->pCode, (uint32_t*)pCreateInfo->pCode + pCreateInfo->codeSize / sizeof(uint32_t)),
           has_valid_spirv(true),
           vk_shader_module(shaderModule),
-          gpu_validation_shader_id(unique_shader_id) {}
+          gpu_validation_shader_id(unique_shader_id) {
+        BuildDefIndex();
+    }
 
     SHADER_MODULE_STATE() : has_valid_spirv(false), vk_shader_module(VK_NULL_HANDLE) {}
 
@@ -680,6 +684,16 @@ struct SHADER_MODULE_STATE {
     spirv_inst_iter end() const { return spirv_inst_iter(words.begin(), words.end()); }          // Just past last insn
     // Given an offset into the module, produce an iterator there.
     spirv_inst_iter at(unsigned offset) const { return spirv_inst_iter(words.begin(), words.begin() + offset); }
+
+    // Gets an iterator to the definition of an id
+    spirv_inst_iter get_def(unsigned id) const {
+        auto it = def_index.find(id);
+        if (it == def_index.end()) {
+            return end();
+        }
+        return at(it->second);
+    }
+    void BuildDefIndex();
 };
 
 struct PHYSICAL_DEVICE_STATE {
@@ -750,6 +764,17 @@ class GpuVal : public ValidationObject {
     uint32_t GetQueueState(VkQueue queue);
     PHYSICAL_DEVICE_STATE* GetPhysicalDeviceState(VkPhysicalDevice phys);
     PHYSICAL_DEVICE_STATE* GetPhysicalDeviceState();
+
+    bool ValidatePipelineShaderStage(VkPipelineShaderStageCreateInfo const *pStage, PIPELINE_STATE *pipeline,
+        SHADER_MODULE_STATE const **out_module, spirv_inst_iter *out_entrypoint/*,bool check_point_size*/);
+    bool ValidateAndCapturePipelineShaderState(PIPELINE_STATE *pipeline);
+
+
+    bool ValidateComputePipeline(PIPELINE_STATE *pipeline);
+    bool ValidateRayTracingPipelineNV(PIPELINE_STATE *pipeline);
+
+
+
 
     void PreCallRecordDestroyRenderPass(VkDevice device, VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator);
     void RecordCreateRenderPassState(RenderPassCreateVersion rp_version, std::shared_ptr<RENDER_PASS_STATE>& render_pass,

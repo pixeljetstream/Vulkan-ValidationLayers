@@ -397,6 +397,675 @@ std::shared_ptr<RENDER_PASS_STATE> GpuVal::GetRenderPassStateSharedPtr(VkRenderP
     return it->second;
 }
 
+static uint32_t GetShaderStageId(VkShaderStageFlagBits stage) {
+    uint32_t bit_pos = uint32_t(u_ffs(stage));
+    return bit_pos - 1;
+}
+
+
+// LUGMAL got to here, pullin in stuff to support filling in active_slots
+
+typedef std::pair<unsigned, unsigned> descriptor_slot_t;
+struct interface_var {
+    uint32_t id;
+    uint32_t type_id;
+    uint32_t offset;
+    bool is_patch;
+    bool is_block_member;
+    bool is_relaxed_precision;
+    // TODO: collect the name, too? Isn't required to be present.
+};
+
+static unsigned ValueOrDefault(std::unordered_map<unsigned, unsigned> const &map, unsigned id, unsigned def) {
+    auto it = map.find(id);
+    if (it == map.end())
+        return def;
+    else
+        return it->second;
+}
+
+static bool IsWritableDescriptorType(SHADER_MODULE_STATE const *module, uint32_t type_id, bool is_storage_buffer) {
+    auto type = module->get_def(type_id);
+
+    // Strip off any array or ptrs. Where we remove array levels, adjust the  descriptor count for each dimension.
+    while (type.opcode() == spv::OpTypeArray || type.opcode() == spv::OpTypePointer || type.opcode() == spv::OpTypeRuntimeArray) {
+        if (type.opcode() == spv::OpTypeArray || type.opcode() == spv::OpTypeRuntimeArray) {
+            type = module->get_def(type.word(2));  // Element type
+        } else {
+            type = module->get_def(type.word(3));  // Pointee type
+        }
+    }
+
+    switch (type.opcode()) {
+    case spv::OpTypeImage: {
+        auto dim = type.word(3);
+        auto sampled = type.word(7);
+        return sampled == 2 && dim != spv::DimSubpassData;
+    }
+
+    case spv::OpTypeStruct: {
+        std::unordered_set<unsigned> nonwritable_members;
+        for (auto insn : *module) {
+            if (insn.opcode() == spv::OpDecorate && insn.word(1) == type.word(1)) {
+                if (insn.word(2) == spv::DecorationBufferBlock) {
+                    // Legacy storage block in the Uniform storage class
+                    // has its struct type decorated with BufferBlock.
+                    is_storage_buffer = true;
+                }
+            } else if (insn.opcode() == spv::OpMemberDecorate && insn.word(1) == type.word(1) &&
+                insn.word(3) == spv::DecorationNonWritable) {
+                nonwritable_members.insert(insn.word(2));
+            }
+        }
+
+        // A buffer is writable if it's either flavor of storage buffer, and has any member not decorated
+        // as nonwritable.
+        return is_storage_buffer && nonwritable_members.size() != type.len() - 2;
+    }
+    }
+
+    return false;
+}
+
+static void ProcessExecutionModes(SHADER_MODULE_STATE const *src, spirv_inst_iter entrypoint, PIPELINE_STATE *pipeline) {
+    auto entrypoint_id = entrypoint.word(2);
+    bool is_point_mode = false;
+
+    for (auto insn : *src) {
+        if (insn.opcode() == spv::OpExecutionMode && insn.word(1) == entrypoint_id) {
+            switch (insn.word(2)) {
+            case spv::ExecutionModePointMode:
+                // In tessellation shaders, PointMode is separate and trumps the tessellation topology.
+                is_point_mode = true;
+                break;
+
+            case spv::ExecutionModeOutputPoints:
+                pipeline->topology_at_rasterizer = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+                break;
+
+            case spv::ExecutionModeIsolines:
+            case spv::ExecutionModeOutputLineStrip:
+                pipeline->topology_at_rasterizer = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+                break;
+
+            case spv::ExecutionModeTriangles:
+            case spv::ExecutionModeQuads:
+            case spv::ExecutionModeOutputTriangleStrip:
+                pipeline->topology_at_rasterizer = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+                break;
+            }
+        }
+    }
+
+    if (is_point_mode) pipeline->topology_at_rasterizer = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+}
+
+enum FORMAT_TYPE {
+    FORMAT_TYPE_FLOAT = 1,  // UNORM, SNORM, FLOAT, USCALED, SSCALED, SRGB -- anything we consider float in the shader
+    FORMAT_TYPE_SINT = 2,
+    FORMAT_TYPE_UINT = 4,
+};
+
+
+// characterizes a SPIR-V type appearing in an interface to a FF stage, for comparison to a VkFormat's characterization above.
+// also used for input attachments, as we statically know their format.
+static unsigned GetFundamentalType(SHADER_MODULE_STATE const *src, unsigned type) {
+    auto insn = src->get_def(type);
+    assert(insn != src->end());
+
+    switch (insn.opcode()) {
+    case spv::OpTypeInt:
+        return insn.word(3) ? FORMAT_TYPE_SINT : FORMAT_TYPE_UINT;
+    case spv::OpTypeFloat:
+        return FORMAT_TYPE_FLOAT;
+    case spv::OpTypeVector:
+    case spv::OpTypeMatrix:
+    case spv::OpTypeArray:
+    case spv::OpTypeRuntimeArray:
+    case spv::OpTypeImage:
+        return GetFundamentalType(src, insn.word(2));
+    case spv::OpTypePointer:
+        return GetFundamentalType(src, insn.word(3));
+
+    default:
+        return 0;
+    }
+}
+
+static uint32_t DescriptorTypeToReqs(SHADER_MODULE_STATE const *module, uint32_t type_id) {
+    auto type = module->get_def(type_id);
+
+    while (true) {
+        switch (type.opcode()) {
+        case spv::OpTypeArray:
+        case spv::OpTypeRuntimeArray:
+        case spv::OpTypeSampledImage:
+            type = module->get_def(type.word(2));
+            break;
+        case spv::OpTypePointer:
+            type = module->get_def(type.word(3));
+            break;
+        case spv::OpTypeImage: {
+            auto dim = type.word(3);
+            auto arrayed = type.word(5);
+            auto msaa = type.word(6);
+
+            uint32_t bits = 0;
+            switch (GetFundamentalType(module, type.word(2))) {
+            case FORMAT_TYPE_FLOAT:
+                bits = DESCRIPTOR_REQ_COMPONENT_TYPE_FLOAT;
+                break;
+            case FORMAT_TYPE_UINT:
+                bits = DESCRIPTOR_REQ_COMPONENT_TYPE_UINT;
+                break;
+            case FORMAT_TYPE_SINT:
+                bits = DESCRIPTOR_REQ_COMPONENT_TYPE_SINT;
+                break;
+            default:
+                break;
+            }
+
+            switch (dim) {
+            case spv::Dim1D:
+                bits |= arrayed ? DESCRIPTOR_REQ_VIEW_TYPE_1D_ARRAY : DESCRIPTOR_REQ_VIEW_TYPE_1D;
+                return bits;
+            case spv::Dim2D:
+                bits |= msaa ? DESCRIPTOR_REQ_MULTI_SAMPLE : DESCRIPTOR_REQ_SINGLE_SAMPLE;
+                bits |= arrayed ? DESCRIPTOR_REQ_VIEW_TYPE_2D_ARRAY : DESCRIPTOR_REQ_VIEW_TYPE_2D;
+                return bits;
+            case spv::Dim3D:
+                bits |= DESCRIPTOR_REQ_VIEW_TYPE_3D;
+                return bits;
+            case spv::DimCube:
+                bits |= arrayed ? DESCRIPTOR_REQ_VIEW_TYPE_CUBE_ARRAY : DESCRIPTOR_REQ_VIEW_TYPE_CUBE;
+                return bits;
+            case spv::DimSubpassData:
+                bits |= msaa ? DESCRIPTOR_REQ_MULTI_SAMPLE : DESCRIPTOR_REQ_SINGLE_SAMPLE;
+                return bits;
+            default:  // buffer, etc.
+                return bits;
+            }
+        }
+        default:
+            return 0;
+        }
+    }
+}
+
+static std::vector<std::pair<descriptor_slot_t, interface_var>> CollectInterfaceByDescriptorSlot(
+    debug_report_data const *report_data, SHADER_MODULE_STATE const *src, std::unordered_set<uint32_t> const &accessible_ids,
+    bool *has_writable_descriptor) {
+    std::unordered_map<unsigned, unsigned> var_sets;
+    std::unordered_map<unsigned, unsigned> var_bindings;
+    std::unordered_map<unsigned, unsigned> var_nonwritable;
+
+    for (auto insn : *src) {
+        // All variables in the Uniform or UniformConstant storage classes are required to be decorated with both
+        // DecorationDescriptorSet and DecorationBinding.
+        if (insn.opcode() == spv::OpDecorate) {
+            if (insn.word(2) == spv::DecorationDescriptorSet) {
+                var_sets[insn.word(1)] = insn.word(3);
+            }
+
+            if (insn.word(2) == spv::DecorationBinding) {
+                var_bindings[insn.word(1)] = insn.word(3);
+            }
+
+            // Note: do toplevel DecorationNonWritable out here; it applies to
+            // the OpVariable rather than the type.
+            if (insn.word(2) == spv::DecorationNonWritable) {
+                var_nonwritable[insn.word(1)] = 1;
+            }
+        }
+    }
+
+    std::vector<std::pair<descriptor_slot_t, interface_var>> out;
+
+    for (auto id : accessible_ids) {
+        auto insn = src->get_def(id);
+        assert(insn != src->end());
+
+        if (insn.opcode() == spv::OpVariable &&
+            (insn.word(3) == spv::StorageClassUniform || insn.word(3) == spv::StorageClassUniformConstant ||
+                insn.word(3) == spv::StorageClassStorageBuffer)) {
+            unsigned set = ValueOrDefault(var_sets, insn.word(2), 0);
+            unsigned binding = ValueOrDefault(var_bindings, insn.word(2), 0);
+
+            interface_var v = {};
+            v.id = insn.word(2);
+            v.type_id = insn.word(1);
+            out.emplace_back(std::make_pair(set, binding), v);
+
+            if (var_nonwritable.find(id) == var_nonwritable.end() &&
+                IsWritableDescriptorType(src, insn.word(1), insn.word(3) == spv::StorageClassStorageBuffer)) {
+                *has_writable_descriptor = true;
+            }
+        }
+    }
+
+    return out;
+}
+
+// For some analyses, we need to know about all ids referenced by the static call tree of a particular entrypoint. This is
+// important for identifying the set of shader resources actually used by an entrypoint, for example.
+// Note: we only explore parts of the image which might actually contain ids we care about for the above analyses.
+//  - NOT the shader input/output interfaces.
+//
+// TODO: The set of interesting opcodes here was determined by eyeballing the SPIRV spec. It might be worth
+// converting parts of this to be generated from the machine-readable spec instead.
+static std::unordered_set<uint32_t> MarkAccessibleIds(SHADER_MODULE_STATE const *src, spirv_inst_iter entrypoint) {
+    std::unordered_set<uint32_t> ids;
+    std::unordered_set<uint32_t> worklist;
+    worklist.insert(entrypoint.word(2));
+
+    while (!worklist.empty()) {
+        auto id_iter = worklist.begin();
+        auto id = *id_iter;
+        worklist.erase(id_iter);
+
+        auto insn = src->get_def(id);
+        if (insn == src->end()) {
+            // ID is something we didn't collect in BuildDefIndex. that's OK -- we'll stumble across all kinds of things here
+            // that we may not care about.
+            continue;
+        }
+
+        // Try to add to the output set
+        if (!ids.insert(id).second) {
+            continue;  // If we already saw this id, we don't want to walk it again.
+        }
+
+        switch (insn.opcode()) {
+        case spv::OpFunction:
+            // Scan whole body of the function, enlisting anything interesting
+            while (++insn, insn.opcode() != spv::OpFunctionEnd) {
+                switch (insn.opcode()) {
+                case spv::OpLoad:
+                case spv::OpAtomicLoad:
+                case spv::OpAtomicExchange:
+                case spv::OpAtomicCompareExchange:
+                case spv::OpAtomicCompareExchangeWeak:
+                case spv::OpAtomicIIncrement:
+                case spv::OpAtomicIDecrement:
+                case spv::OpAtomicIAdd:
+                case spv::OpAtomicISub:
+                case spv::OpAtomicSMin:
+                case spv::OpAtomicUMin:
+                case spv::OpAtomicSMax:
+                case spv::OpAtomicUMax:
+                case spv::OpAtomicAnd:
+                case spv::OpAtomicOr:
+                case spv::OpAtomicXor:
+                    worklist.insert(insn.word(3));  // ptr
+                    break;
+                case spv::OpStore:
+                case spv::OpAtomicStore:
+                    worklist.insert(insn.word(1));  // ptr
+                    break;
+                case spv::OpAccessChain:
+                case spv::OpInBoundsAccessChain:
+                    worklist.insert(insn.word(3));  // base ptr
+                    break;
+                case spv::OpSampledImage:
+                case spv::OpImageSampleImplicitLod:
+                case spv::OpImageSampleExplicitLod:
+                case spv::OpImageSampleDrefImplicitLod:
+                case spv::OpImageSampleDrefExplicitLod:
+                case spv::OpImageSampleProjImplicitLod:
+                case spv::OpImageSampleProjExplicitLod:
+                case spv::OpImageSampleProjDrefImplicitLod:
+                case spv::OpImageSampleProjDrefExplicitLod:
+                case spv::OpImageFetch:
+                case spv::OpImageGather:
+                case spv::OpImageDrefGather:
+                case spv::OpImageRead:
+                case spv::OpImage:
+                case spv::OpImageQueryFormat:
+                case spv::OpImageQueryOrder:
+                case spv::OpImageQuerySizeLod:
+                case spv::OpImageQuerySize:
+                case spv::OpImageQueryLod:
+                case spv::OpImageQueryLevels:
+                case spv::OpImageQuerySamples:
+                case spv::OpImageSparseSampleImplicitLod:
+                case spv::OpImageSparseSampleExplicitLod:
+                case spv::OpImageSparseSampleDrefImplicitLod:
+                case spv::OpImageSparseSampleDrefExplicitLod:
+                case spv::OpImageSparseSampleProjImplicitLod:
+                case spv::OpImageSparseSampleProjExplicitLod:
+                case spv::OpImageSparseSampleProjDrefImplicitLod:
+                case spv::OpImageSparseSampleProjDrefExplicitLod:
+                case spv::OpImageSparseFetch:
+                case spv::OpImageSparseGather:
+                case spv::OpImageSparseDrefGather:
+                case spv::OpImageTexelPointer:
+                    worklist.insert(insn.word(3));  // Image or sampled image
+                    break;
+                case spv::OpImageWrite:
+                    worklist.insert(insn.word(1));  // Image -- different operand order to above
+                    break;
+                case spv::OpFunctionCall:
+                    for (uint32_t i = 3; i < insn.len(); i++) {
+                        worklist.insert(insn.word(i));  // fn itself, and all args
+                    }
+                    break;
+
+                case spv::OpExtInst:
+                    for (uint32_t i = 5; i < insn.len(); i++) {
+                        worklist.insert(insn.word(i));  // Operands to ext inst
+                    }
+                    break;
+                }
+            }
+            break;
+        }
+    }
+
+    return ids;
+}
+
+unsigned ExecutionModelToShaderStageFlagBits(unsigned mode) {
+    switch (mode) {
+    case spv::ExecutionModelVertex:
+        return VK_SHADER_STAGE_VERTEX_BIT;
+    case spv::ExecutionModelTessellationControl:
+        return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+    case spv::ExecutionModelTessellationEvaluation:
+        return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    case spv::ExecutionModelGeometry:
+        return VK_SHADER_STAGE_GEOMETRY_BIT;
+    case spv::ExecutionModelFragment:
+        return VK_SHADER_STAGE_FRAGMENT_BIT;
+    case spv::ExecutionModelGLCompute:
+        return VK_SHADER_STAGE_COMPUTE_BIT;
+    case spv::ExecutionModelRayGenerationNV:
+        return VK_SHADER_STAGE_RAYGEN_BIT_NV;
+    case spv::ExecutionModelAnyHitNV:
+        return VK_SHADER_STAGE_ANY_HIT_BIT_NV;
+    case spv::ExecutionModelClosestHitNV:
+        return VK_SHADER_STAGE_CLOSEST_HIT_BIT_NV;
+    case spv::ExecutionModelMissNV:
+        return VK_SHADER_STAGE_MISS_BIT_NV;
+    case spv::ExecutionModelIntersectionNV:
+        return VK_SHADER_STAGE_INTERSECTION_BIT_NV;
+    case spv::ExecutionModelCallableNV:
+        return VK_SHADER_STAGE_CALLABLE_BIT_NV;
+    case spv::ExecutionModelTaskNV:
+        return VK_SHADER_STAGE_TASK_BIT_NV;
+    case spv::ExecutionModelMeshNV:
+        return VK_SHADER_STAGE_MESH_BIT_NV;
+    default:
+        return 0;
+    }
+}
+
+static spirv_inst_iter FindEntrypoint(SHADER_MODULE_STATE const *src, char const *name, VkShaderStageFlagBits stageBits) {
+    for (auto insn : *src) {
+        if (insn.opcode() == spv::OpEntryPoint) {
+            auto entrypointName = (char const *)&insn.word(3);
+            auto executionModel = insn.word(1);
+            auto entrypointStageBits = ExecutionModelToShaderStageFlagBits(executionModel);
+
+            if (!strcmp(entrypointName, name) && (entrypointStageBits & stageBits)) {
+                return insn;
+            }
+        }
+    }
+
+    return src->end();
+}
+
+// SPIRV utility functions
+void SHADER_MODULE_STATE::BuildDefIndex() {
+    for (auto insn : *this) {
+        switch (insn.opcode()) {
+            // Types
+        case spv::OpTypeVoid:
+        case spv::OpTypeBool:
+        case spv::OpTypeInt:
+        case spv::OpTypeFloat:
+        case spv::OpTypeVector:
+        case spv::OpTypeMatrix:
+        case spv::OpTypeImage:
+        case spv::OpTypeSampler:
+        case spv::OpTypeSampledImage:
+        case spv::OpTypeArray:
+        case spv::OpTypeRuntimeArray:
+        case spv::OpTypeStruct:
+        case spv::OpTypeOpaque:
+        case spv::OpTypePointer:
+        case spv::OpTypeFunction:
+        case spv::OpTypeEvent:
+        case spv::OpTypeDeviceEvent:
+        case spv::OpTypeReserveId:
+        case spv::OpTypeQueue:
+        case spv::OpTypePipe:
+        case spv::OpTypeAccelerationStructureNV:
+        case spv::OpTypeCooperativeMatrixNV:
+            def_index[insn.word(1)] = insn.offset();
+            break;
+
+            // Fixed constants
+        case spv::OpConstantTrue:
+        case spv::OpConstantFalse:
+        case spv::OpConstant:
+        case spv::OpConstantComposite:
+        case spv::OpConstantSampler:
+        case spv::OpConstantNull:
+            def_index[insn.word(2)] = insn.offset();
+            break;
+
+            // Specialization constants
+        case spv::OpSpecConstantTrue:
+        case spv::OpSpecConstantFalse:
+        case spv::OpSpecConstant:
+        case spv::OpSpecConstantComposite:
+        case spv::OpSpecConstantOp:
+            def_index[insn.word(2)] = insn.offset();
+            break;
+
+            // Variables
+        case spv::OpVariable:
+            def_index[insn.word(2)] = insn.offset();
+            break;
+
+            // Functions
+        case spv::OpFunction:
+            def_index[insn.word(2)] = insn.offset();
+            break;
+
+        default:
+            // We don't care about any other defs for now.
+            break;
+        }
+    }
+}
+
+bool GpuVal::ValidatePipelineShaderStage(VkPipelineShaderStageCreateInfo const *pStage, PIPELINE_STATE *pipeline,
+    SHADER_MODULE_STATE const **out_module, spirv_inst_iter *out_entrypoint/*,bool check_point_size*/) {
+    bool skip = false;
+    auto module = *out_module = GetShaderModuleState(pStage->module);
+
+    if (!module->has_valid_spirv) return false;
+
+    // Find the entrypoint
+    auto entrypoint = *out_entrypoint = FindEntrypoint(module, pStage->pName, pStage->stage);
+    //////////////if (entrypoint == module->end()) {
+    //////////////    if (log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, 0,
+    //////////////        "VUID-VkPipelineShaderStageCreateInfo-pName-00707", "No entrypoint found named `%s` for stage %s..",
+    //////////////        pStage->pName, string_VkShaderStageFlagBits(pStage->stage))) {
+    //////////////        return true;  // no point continuing beyond here, any analysis is just going to be garbage.
+    //////////////    }
+    //////////////}
+
+    // Mark accessible ids
+    auto accessible_ids = MarkAccessibleIds(module, entrypoint);
+    ProcessExecutionModes(module, entrypoint, pipeline);
+
+    // Validate descriptor set layout against what the entrypoint actually uses
+    bool has_writable_descriptor = false;
+    auto descriptor_uses = CollectInterfaceByDescriptorSlot(report_data, module, accessible_ids, &has_writable_descriptor);
+
+    //////////// Validate shader capabilities against enabled device features
+    //////////skip |= ValidateShaderCapabilities(module, pStage->stage, has_writable_descriptor);
+    //////////skip |= ValidateShaderStageInputOutputLimits(module, pStage, pipeline);
+    //////////skip |= ValidateExecutionModes(module, entrypoint);
+    //////////skip |= ValidateSpecializationOffsets(report_data, pStage);
+    //////////skip |= ValidatePushConstantUsage(report_data, pipeline->pipeline_layout.push_constant_ranges.get(), module, accessible_ids,
+    //////////    pStage->stage);
+    //////////if (check_point_size && !pipeline->graphicsPipelineCI.pRasterizationState->rasterizerDiscardEnable) {
+    //////////    skip |= ValidatePointListShaderState(pipeline, module, entrypoint, pStage->stage);
+    //////////}
+    //////////skip |= ValidateCooperativeMatrix(module, pStage, pipeline);
+
+    // Validate descriptor use
+    for (auto use : descriptor_uses) {
+        // While validating shaders capture which slots are used by the pipeline
+        auto &reqs = pipeline->active_slots[use.first.first][use.first.second];
+        reqs = descriptor_req(reqs | DescriptorTypeToReqs(module, use.second.type_id));
+
+        ////////// Verify given pipelineLayout has requested setLayout with requested binding
+        ////////const auto &binding = GetDescriptorBinding(&pipeline->pipeline_layout, use.first);
+        ////////unsigned required_descriptor_count;
+        ////////std::set<uint32_t> descriptor_types = TypeToDescriptorTypeSet(module, use.second.type_id, required_descriptor_count);
+
+        ////////if (!binding) {
+        ////////    skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, 0,
+        ////////        kVUID_Core_Shader_MissingDescriptor,
+        ////////        "Shader uses descriptor slot %u.%u (expected `%s`) but not declared in pipeline layout",
+        ////////        use.first.first, use.first.second, string_descriptorTypes(descriptor_types).c_str());
+        ////////} else if (~binding->stageFlags & pStage->stage) {
+        ////////    skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_EXT, 0,
+        ////////        kVUID_Core_Shader_DescriptorNotAccessibleFromStage,
+        ////////        "Shader uses descriptor slot %u.%u but descriptor not accessible from stage %s", use.first.first,
+        ////////        use.first.second, string_VkShaderStageFlagBits(pStage->stage));
+        ////////} else if (descriptor_types.find(binding->descriptorType) == descriptor_types.end()) {
+        ////////    skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, 0,
+        ////////        kVUID_Core_Shader_DescriptorTypeMismatch,
+        ////////        "Type mismatch on descriptor slot %u.%u (expected `%s`) but descriptor of type %s", use.first.first,
+        ////////        use.first.second, string_descriptorTypes(descriptor_types).c_str(),
+        ////////        string_VkDescriptorType(binding->descriptorType));
+        ////////} else if (binding->descriptorCount < required_descriptor_count) {
+        ////////    skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, 0,
+        ////////        kVUID_Core_Shader_DescriptorTypeMismatch,
+        ////////        "Shader expects at least %u descriptors for binding %u.%u but only %u provided",
+        ////////        required_descriptor_count, use.first.first, use.first.second, binding->descriptorCount);
+        ////////}
+    }
+
+    ////////////// Validate use of input attachments against subpass structure
+    ////////////if (pStage->stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
+    ////////////    auto input_attachment_uses = CollectInterfaceByInputAttachmentIndex(module, accessible_ids);
+
+    ////////////    auto rpci = pipeline->rp_state->createInfo.ptr();
+    ////////////    auto subpass = pipeline->graphicsPipelineCI.subpass;
+
+    ////////////    for (auto use : input_attachment_uses) {
+    ////////////        auto input_attachments = rpci->pSubpasses[subpass].pInputAttachments;
+    ////////////        auto index = (input_attachments && use.first < rpci->pSubpasses[subpass].inputAttachmentCount)
+    ////////////            ? input_attachments[use.first].attachment
+    ////////////            : VK_ATTACHMENT_UNUSED;
+
+    ////////////        if (index == VK_ATTACHMENT_UNUSED) {
+    ////////////            skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, 0,
+    ////////////                kVUID_Core_Shader_MissingInputAttachment,
+    ////////////                "Shader consumes input attachment index %d but not provided in subpass", use.first);
+    ////////////        } else if (!(GetFormatType(rpci->pAttachments[index].format) & GetFundamentalType(module, use.second.type_id))) {
+    ////////////            skip |=
+    ////////////                log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, 0,
+    ////////////                    kVUID_Core_Shader_InputAttachmentTypeMismatch,
+    ////////////                    "Subpass input attachment %u format of %s does not match type used in shader `%s`", use.first,
+    ////////////                    string_VkFormat(rpci->pAttachments[index].format), DescribeType(module, use.second.type_id).c_str());
+    ////////////        }
+    ////////////    }
+    ////////////}
+    ////////////if (pStage->stage == VK_SHADER_STAGE_COMPUTE_BIT) {
+    ////////////    skip |= ValidateComputeWorkGroupSizes(module);
+    ////////////}
+    return skip;
+}
+
+bool GpuVal::ValidateComputePipeline(PIPELINE_STATE *pipeline) {
+    auto pCreateInfo = pipeline->computePipelineCI.ptr();
+
+    SHADER_MODULE_STATE const *module;
+    spirv_inst_iter entrypoint;
+
+    return ValidatePipelineShaderStage(&pCreateInfo->stage, pipeline, &module, &entrypoint);
+}
+
+bool GpuVal::ValidateRayTracingPipelineNV(PIPELINE_STATE *pipeline) {
+    auto pCreateInfo = pipeline->raytracingPipelineCI.ptr();
+
+    SHADER_MODULE_STATE const *module;
+    spirv_inst_iter entrypoint;
+
+    return ValidatePipelineShaderStage(pCreateInfo->pStages, pipeline, &module, &entrypoint);
+}
+
+
+bool GpuVal::ValidateAndCapturePipelineShaderState(PIPELINE_STATE *pipeline) {
+    auto pCreateInfo = pipeline->graphicsPipelineCI.ptr();
+    ////////int vertex_stage = GetShaderStageId(VK_SHADER_STAGE_VERTEX_BIT);
+    ////////int fragment_stage = GetShaderStageId(VK_SHADER_STAGE_FRAGMENT_BIT);
+
+    SHADER_MODULE_STATE const *shaders[32];
+    memset(shaders, 0, sizeof(shaders));
+    spirv_inst_iter entrypoints[32];
+    memset(entrypoints, 0, sizeof(entrypoints));
+
+    ////////uint32_t pointlist_stage_mask = DetermineFinalGeomStage(pipeline, pCreateInfo);
+
+
+    for (uint32_t i = 0; i < pCreateInfo->stageCount; i++) {
+        auto pStage = &pCreateInfo->pStages[i];
+        auto stage_id = GetShaderStageId(pStage->stage);
+        ValidatePipelineShaderStage(pStage, pipeline, &shaders[stage_id], &entrypoints[stage_id]);
+    }
+
+    ////////// if the shader stages are no good individually, cross-stage validation is pointless.
+    ////////if (skip) return true;
+
+    ////////auto vi = pCreateInfo->pVertexInputState;
+
+    ////////if (vi) {
+    ////////    skip |= ValidateViConsistency(report_data, vi);
+    ////////}
+
+    ////////if (shaders[vertex_stage] && shaders[vertex_stage]->has_valid_spirv) {
+    ////////    skip |= ValidateViAgainstVsInputs(report_data, vi, shaders[vertex_stage], entrypoints[vertex_stage]);
+    ////////}
+
+    ////////int producer = GetShaderStageId(VK_SHADER_STAGE_VERTEX_BIT);
+    ////////int consumer = GetShaderStageId(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT);
+
+    ////////while (!shaders[producer] && producer != fragment_stage) {
+    ////////    producer++;
+    ////////    consumer++;
+    ////////}
+
+    ////////for (; producer != fragment_stage && consumer <= fragment_stage; consumer++) {
+    ////////    assert(shaders[producer]);
+    ////////    if (shaders[consumer]) {
+    ////////        if (shaders[consumer]->has_valid_spirv && shaders[producer]->has_valid_spirv) {
+    ////////            skip |= ValidateInterfaceBetweenStages(report_data, shaders[producer], entrypoints[producer],
+    ////////                &shader_stage_attribs[producer], shaders[consumer], entrypoints[consumer],
+    ////////                &shader_stage_attribs[consumer]);
+    ////////        }
+
+    ////////        producer = consumer;
+    ////////    }
+    ////////}
+
+    ////////if (shaders[fragment_stage] && shaders[fragment_stage]->has_valid_spirv) {
+    ////////    skip |= ValidateFsOutputsAgainstRenderPass(report_data, shaders[fragment_stage], entrypoints[fragment_stage], pipeline,
+    ////////        pCreateInfo->subpass);
+    ////////}
+
+    return false;
+}
+
+
 bool GpuVal::PreCallValidateCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t count,
                                                     const VkGraphicsPipelineCreateInfo *pCreateInfos,
                                                     const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines,
@@ -409,6 +1078,12 @@ bool GpuVal::PreCallValidateCreateGraphicsPipelines(VkDevice device, VkPipelineC
         (cgpl_state->pipe_state)[i]->initGraphicsPipeline(&pCreateInfos[i],
                                                           GetRenderPassStateSharedPtr(pCreateInfos[i].renderPass));
         (cgpl_state->pipe_state)[i]->pipeline_layout = *GetPipelineLayout(pCreateInfos[i].layout);
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        ////ValidatePipelineUnlocked(cgpl_state->pipe_state, i);
+        PIPELINE_STATE *pipe_state = (cgpl_state->pipe_state)[i].get();
+        ValidateAndCapturePipelineShaderState(pipe_state);
     }
 
     return skip;
