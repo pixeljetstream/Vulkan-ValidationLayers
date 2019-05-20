@@ -403,6 +403,249 @@ static uint32_t GetShaderStageId(VkShaderStageFlagBits stage) {
 }
 
 
+
+cvdescriptorset::DecodedTemplateUpdate::DecodedTemplateUpdate(GpuVal *device_data, VkDescriptorSet descriptorSet,
+    const TEMPLATE_STATE *template_state, const void *pData,
+    VkDescriptorSetLayout push_layout) {
+    auto const &create_info = template_state->create_info;
+    inline_infos.resize(create_info.descriptorUpdateEntryCount);  // Make sure we have one if we need it
+    desc_writes.reserve(create_info.descriptorUpdateEntryCount);  // emplaced, so reserved without initialization
+    VkDescriptorSetLayout effective_dsl = create_info.templateType == VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET
+        ? create_info.descriptorSetLayout
+        : push_layout;
+    auto layout_obj = GetDescriptorSetLayout(device_data, effective_dsl);
+
+    // Create a WriteDescriptorSet struct for each template update entry
+    for (uint32_t i = 0; i < create_info.descriptorUpdateEntryCount; i++) {
+        auto binding_count = layout_obj->GetDescriptorCountFromBinding(create_info.pDescriptorUpdateEntries[i].dstBinding);
+        auto binding_being_updated = create_info.pDescriptorUpdateEntries[i].dstBinding;
+        auto dst_array_element = create_info.pDescriptorUpdateEntries[i].dstArrayElement;
+
+        desc_writes.reserve(desc_writes.size() + create_info.pDescriptorUpdateEntries[i].descriptorCount);
+        for (uint32_t j = 0; j < create_info.pDescriptorUpdateEntries[i].descriptorCount; j++) {
+            desc_writes.emplace_back();
+            auto &write_entry = desc_writes.back();
+
+            size_t offset = create_info.pDescriptorUpdateEntries[i].offset + j * create_info.pDescriptorUpdateEntries[i].stride;
+            char *update_entry = (char *)(pData)+offset;
+
+            if (dst_array_element >= binding_count) {
+                dst_array_element = 0;
+                binding_being_updated = layout_obj->GetNextValidBinding(binding_being_updated);
+            }
+
+            write_entry.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write_entry.pNext = NULL;
+            write_entry.dstSet = descriptorSet;
+            write_entry.dstBinding = binding_being_updated;
+            write_entry.dstArrayElement = dst_array_element;
+            write_entry.descriptorCount = 1;
+            write_entry.descriptorType = create_info.pDescriptorUpdateEntries[i].descriptorType;
+
+            switch (create_info.pDescriptorUpdateEntries[i].descriptorType) {
+            case VK_DESCRIPTOR_TYPE_SAMPLER:
+            case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+            case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+            case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+            case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+                write_entry.pImageInfo = reinterpret_cast<VkDescriptorImageInfo *>(update_entry);
+                break;
+
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+                write_entry.pBufferInfo = reinterpret_cast<VkDescriptorBufferInfo *>(update_entry);
+                break;
+
+            case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+            case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+                write_entry.pTexelBufferView = reinterpret_cast<VkBufferView *>(update_entry);
+                break;
+            case VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT: {
+                VkWriteDescriptorSetInlineUniformBlockEXT *inline_info = &inline_infos[i];
+                inline_info->sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK_EXT;
+                inline_info->pNext = nullptr;
+                inline_info->dataSize = create_info.pDescriptorUpdateEntries[i].descriptorCount;
+                inline_info->pData = update_entry;
+                write_entry.pNext = inline_info;
+                // skip the rest of the array, they just represent bytes in the update
+                j = create_info.pDescriptorUpdateEntries[i].descriptorCount;
+                break;
+            }
+            default:
+                assert(0);
+                break;
+            }
+            dst_array_element++;
+        }
+    }
+}
+
+void GpuVal::PreCallRecordDestroyDescriptorUpdateTemplate(VkDevice device,
+    VkDescriptorUpdateTemplateKHR descriptorUpdateTemplate,
+    const VkAllocationCallbacks *pAllocator) {
+    if (!descriptorUpdateTemplate) return;
+    desc_template_map.erase(descriptorUpdateTemplate);
+}
+
+void GpuVal::PreCallRecordDestroyDescriptorUpdateTemplateKHR(VkDevice device,
+    VkDescriptorUpdateTemplateKHR descriptorUpdateTemplate,
+    const VkAllocationCallbacks *pAllocator) {
+    if (!descriptorUpdateTemplate) return;
+    desc_template_map.erase(descriptorUpdateTemplate);
+}
+
+void GpuVal::RecordCreateDescriptorUpdateTemplateState(const VkDescriptorUpdateTemplateCreateInfoKHR *pCreateInfo,
+    VkDescriptorUpdateTemplateKHR *pDescriptorUpdateTemplate) {
+    safe_VkDescriptorUpdateTemplateCreateInfo *local_create_info = new safe_VkDescriptorUpdateTemplateCreateInfo(pCreateInfo);
+    std::unique_ptr<TEMPLATE_STATE> template_state(new TEMPLATE_STATE(*pDescriptorUpdateTemplate, local_create_info));
+    desc_template_map[*pDescriptorUpdateTemplate] = std::move(template_state);
+}
+
+void GpuVal::PostCallRecordCreateDescriptorUpdateTemplate(VkDevice device,
+    const VkDescriptorUpdateTemplateCreateInfoKHR *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkDescriptorUpdateTemplateKHR *pDescriptorUpdateTemplate,
+    VkResult result) {
+    if (VK_SUCCESS != result) return;
+    RecordCreateDescriptorUpdateTemplateState(pCreateInfo, pDescriptorUpdateTemplate);
+}
+
+void GpuVal::PostCallRecordCreateDescriptorUpdateTemplateKHR(VkDevice device,
+    const VkDescriptorUpdateTemplateCreateInfoKHR *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkDescriptorUpdateTemplateKHR *pDescriptorUpdateTemplate,
+    VkResult result) {
+    if (VK_SUCCESS != result) return;
+    RecordCreateDescriptorUpdateTemplateState(pCreateInfo, pDescriptorUpdateTemplate);
+}
+
+
+
+
+void GpuVal::PerformUpdateDescriptorSetsWithTemplateKHR(VkDescriptorSet descriptorSet, const TEMPLATE_STATE *template_state,
+    const void *pData) {
+    // Translate the templated update into a normal update for validation...
+    cvdescriptorset::DecodedTemplateUpdate decoded_update(this, descriptorSet, template_state, pData);
+    cvdescriptorset::PerformUpdateDescriptorSets(this, static_cast<uint32_t>(decoded_update.desc_writes.size()),
+        decoded_update.desc_writes.data(), 0, NULL);
+}
+
+void GpuVal::PreCallRecordUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
+    const VkWriteDescriptorSet *pDescriptorWrites, uint32_t descriptorCopyCount,
+    const VkCopyDescriptorSet *pDescriptorCopies) {
+    cvdescriptorset::PerformUpdateDescriptorSets(this, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount,
+        pDescriptorCopies);
+}
+
+void GpuVal::RecordUpdateDescriptorSetWithTemplateState(VkDescriptorSet descriptorSet,
+    VkDescriptorUpdateTemplateKHR descriptorUpdateTemplate,
+    const void *pData) {
+    auto const template_map_entry = desc_template_map.find(descriptorUpdateTemplate);
+    if ((template_map_entry == desc_template_map.end()) || (template_map_entry->second.get() == nullptr)) {
+        assert(0);
+    } else {
+        const TEMPLATE_STATE *template_state = template_map_entry->second.get();
+        // TODO: Record template push descriptor updates
+        if (template_state->create_info.templateType == VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET) {
+            PerformUpdateDescriptorSetsWithTemplateKHR(descriptorSet, template_state, pData);
+        }
+    }
+}
+
+void GpuVal::PreCallRecordUpdateDescriptorSetWithTemplate(VkDevice device, VkDescriptorSet descriptorSet,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    const void *pData) {
+    RecordUpdateDescriptorSetWithTemplateState(descriptorSet, descriptorUpdateTemplate, pData);
+}
+
+void GpuVal::PreCallRecordUpdateDescriptorSetWithTemplateKHR(VkDevice device, VkDescriptorSet descriptorSet,
+    VkDescriptorUpdateTemplateKHR descriptorUpdateTemplate,
+    const void *pData) {
+    RecordUpdateDescriptorSetWithTemplateState(descriptorSet, descriptorUpdateTemplate, pData);
+}
+
+
+
+
+
+
+// Perform write update in given update struct
+void cvdescriptorset::DescriptorSet::PerformWriteUpdate(const VkWriteDescriptorSet *update) {
+    // Perform update on a per-binding basis as consecutive updates roll over to next binding
+    auto descriptors_remaining = update->descriptorCount;
+    auto binding_being_updated = update->dstBinding;
+    auto offset = update->dstArrayElement;
+    uint32_t update_index = 0;
+    while (descriptors_remaining) {
+        uint32_t update_count = std::min(descriptors_remaining, GetDescriptorCountFromBinding(binding_being_updated));
+        auto global_idx = p_layout_->GetGlobalIndexRangeFromBinding(binding_being_updated).start + offset;
+        // Loop over the updates for a single binding at a time
+        for (uint32_t di = 0; di < update_count; ++di, ++update_index) {
+            descriptors_[global_idx + di]->WriteUpdate(update, update_index);
+        }
+        // Roll over to next binding in case of consecutive update
+        descriptors_remaining -= update_count;
+        offset = 0;
+        binding_being_updated++;
+    }
+    ////////////if (!(p_layout_->GetDescriptorBindingFlagsFromBinding(update->dstBinding) &
+    ////////////    (VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT_EXT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT_EXT))) {
+    ////////////    device_data_->InvalidateCommandBuffers(cb_bindings, { HandleToUint64(set_), kVulkanObjectTypeDescriptorSet });
+    ////////////}
+}
+
+// Perform Copy update
+void cvdescriptorset::DescriptorSet::PerformCopyUpdate(const VkCopyDescriptorSet *update, const DescriptorSet *src_set) {
+    auto src_start_idx = src_set->GetGlobalIndexRangeFromBinding(update->srcBinding).start + update->srcArrayElement;
+    auto dst_start_idx = p_layout_->GetGlobalIndexRangeFromBinding(update->dstBinding).start + update->dstArrayElement;
+    // Update parameters all look good so perform update
+    for (uint32_t di = 0; di < update->descriptorCount; ++di) {
+        auto src = src_set->descriptors_[src_start_idx + di].get();
+        auto dst = descriptors_[dst_start_idx + di].get();
+        if (src->updated) {
+            dst->CopyUpdate(src);
+            //////////////////some_update_ = true;
+        } else {
+            dst->updated = false;
+        }
+    }
+
+    ////////////////if (!(p_layout_->GetDescriptorBindingFlagsFromBinding(update->dstBinding) &
+    ////////////////    (VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT_EXT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT_EXT))) {
+    ////////////////    InvalidateBoundCmdBuffers();
+    ////////////////}
+}
+
+
+
+void cvdescriptorset::PerformUpdateDescriptorSets(GpuVal *dev_data, uint32_t write_count, const VkWriteDescriptorSet *p_wds,
+    uint32_t copy_count, const VkCopyDescriptorSet *p_cds) {
+    // Write updates first
+    uint32_t i = 0;
+    for (i = 0; i < write_count; ++i) {
+        auto dest_set = p_wds[i].dstSet;
+        auto set_node = dev_data->GetSetNode(dest_set);
+        if (set_node) {
+            set_node->PerformWriteUpdate(&p_wds[i]);
+        }
+    }
+    // Now copy updates
+    for (i = 0; i < copy_count; ++i) {
+        auto dst_set = p_cds[i].dstSet;
+        auto src_set = p_cds[i].srcSet;
+        auto src_node = dev_data->GetSetNode(src_set);
+        auto dst_node = dev_data->GetSetNode(dst_set);
+        if (src_node && dst_node) {
+            dst_node->PerformCopyUpdate(&p_cds[i], src_node);
+        }
+    }
+}
+
+
+
+
 // LUGMAL got to here, pullin in stuff to support filling in active_slots
 
 typedef std::pair<unsigned, unsigned> descriptor_slot_t;

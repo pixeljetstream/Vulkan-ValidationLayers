@@ -450,8 +450,8 @@ class Descriptor {
    public:
     Descriptor();
     virtual ~Descriptor(){};
-    virtual void WriteUpdate(const VkWriteDescriptorSet*, const uint32_t) { updated = true; };
-    virtual void CopyUpdate(const Descriptor*) { updated = true; };
+    void WriteUpdate(const VkWriteDescriptorSet*, const uint32_t) { updated = true; };
+    void CopyUpdate(const Descriptor*) { updated = true; };
     void BindCommandBuffer(CMD_BUFFER_STATE*);
     void UpdateDrawState(GpuVal*, CMD_BUFFER_STATE*);
     bool updated;  // Has descriptor been updated?
@@ -525,6 +525,8 @@ class DescriptorSet : public BASE_NODE {
     uint32_t GetVariableDescriptorCount() const { return variable_count_; }
     DESCRIPTOR_POOL_STATE* GetPoolState() const { return pool_state_; }
     const Descriptor* GetDescriptorFromGlobalIndex(const uint32_t index) const { return descriptors_[index].get(); }
+    void PerformWriteUpdate(const VkWriteDescriptorSet *);
+    void PerformCopyUpdate(const VkCopyDescriptorSet*, const DescriptorSet *);
 
    private:
     VkDescriptorSet set_;
@@ -535,6 +537,18 @@ class DescriptorSet : public BASE_NODE {
     const VkPhysicalDeviceLimits limits_;
     uint32_t variable_count_;
 };
+
+
+// Helper class to encapsulate the descriptor update template decoding logic
+struct DecodedTemplateUpdate {
+    std::vector<VkWriteDescriptorSet> desc_writes;
+    std::vector<VkWriteDescriptorSetInlineUniformBlockEXT> inline_infos;
+    DecodedTemplateUpdate(GpuVal *device_data, VkDescriptorSet descriptorSet, const TEMPLATE_STATE *template_state,
+        const void *pData, VkDescriptorSetLayout push_layout = VK_NULL_HANDLE);
+};
+
+void PerformUpdateDescriptorSets(GpuVal *dev_data, uint32_t write_count, const VkWriteDescriptorSet *p_wds,
+    uint32_t copy_count, const VkCopyDescriptorSet *p_cds);
 }  // namespace cvdescriptorset
 
 
@@ -702,6 +716,15 @@ struct PHYSICAL_DEVICE_STATE {
     std::vector<VkQueueFamilyProperties> queue_family_properties;
 };
 
+//////////////struct TEMPLATE_STATE {
+//////////////    VkDescriptorUpdateTemplateKHR desc_update_template;
+//////////////    safe_VkDescriptorUpdateTemplateCreateInfo create_info;
+//////////////
+//////////////    TEMPLATE_STATE(VkDescriptorUpdateTemplateKHR update_template, safe_VkDescriptorUpdateTemplateCreateInfo *pCreateInfo)
+//////////////        : desc_update_template(update_template), create_info(*pCreateInfo) {}
+//////////////};
+
+
 // This structure is used to save data across the CreateGraphicsPipelines down-chain API call
 struct create_graphics_pipeline_api_state {
     std::vector<safe_VkGraphicsPipelineCreateInfo> gpu_create_infos;
@@ -768,13 +791,48 @@ class GpuVal : public ValidationObject {
     bool ValidatePipelineShaderStage(VkPipelineShaderStageCreateInfo const *pStage, PIPELINE_STATE *pipeline,
         SHADER_MODULE_STATE const **out_module, spirv_inst_iter *out_entrypoint/*,bool check_point_size*/);
     bool ValidateAndCapturePipelineShaderState(PIPELINE_STATE *pipeline);
+    void PreCallRecordUpdateDescriptorSetWithTemplate(VkDevice device, VkDescriptorSet descriptorSet,
+        VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+        const void *pData);
+    void PreCallRecordUpdateDescriptorSetWithTemplateKHR(VkDevice device, VkDescriptorSet descriptorSet,
+        VkDescriptorUpdateTemplateKHR descriptorUpdateTemplate,
+        const void *pData);
+    void PreCallRecordDestroyDescriptorUpdateTemplate(VkDevice device,
+        VkDescriptorUpdateTemplateKHR descriptorUpdateTemplate,
+        const VkAllocationCallbacks *pAllocator);
+    void PreCallRecordDestroyDescriptorUpdateTemplateKHR(VkDevice device,
+        VkDescriptorUpdateTemplateKHR descriptorUpdateTemplate,
+        const VkAllocationCallbacks *pAllocator);
+    void RecordCreateDescriptorUpdateTemplateState(const VkDescriptorUpdateTemplateCreateInfoKHR *pCreateInfo,
+        VkDescriptorUpdateTemplateKHR *pDescriptorUpdateTemplate);
+    void PostCallRecordCreateDescriptorUpdateTemplate(VkDevice device,
+        const VkDescriptorUpdateTemplateCreateInfoKHR *pCreateInfo,
+        const VkAllocationCallbacks *pAllocator,
+        VkDescriptorUpdateTemplateKHR *pDescriptorUpdateTemplate,
+        VkResult result);
+    void PostCallRecordCreateDescriptorUpdateTemplateKHR(VkDevice device,
+        const VkDescriptorUpdateTemplateCreateInfoKHR *pCreateInfo,
+        const VkAllocationCallbacks *pAllocator,
+        VkDescriptorUpdateTemplateKHR *pDescriptorUpdateTemplate,
+        VkResult result);
+
+
+
+
+
 
 
     bool ValidateComputePipeline(PIPELINE_STATE *pipeline);
     bool ValidateRayTracingPipelineNV(PIPELINE_STATE *pipeline);
 
-
-
+    void PerformUpdateDescriptorSetsWithTemplateKHR(VkDescriptorSet descriptorSet, const TEMPLATE_STATE *template_state,
+        const void *pData);
+    void PreCallRecordUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
+        const VkWriteDescriptorSet *pDescriptorWrites, uint32_t descriptorCopyCount,
+        const VkCopyDescriptorSet *pDescriptorCopies);
+    void RecordUpdateDescriptorSetWithTemplateState(VkDescriptorSet descriptorSet,
+        VkDescriptorUpdateTemplateKHR descriptorUpdateTemplate,
+        const void *pData);
 
     void PreCallRecordDestroyRenderPass(VkDevice device, VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator);
     void RecordCreateRenderPassState(RenderPassCreateVersion rp_version, std::shared_ptr<RENDER_PASS_STATE>& render_pass,
