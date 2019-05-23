@@ -27,7 +27,7 @@
 #include "vk_dispatch_table_helper.h"
 #include "vk_enum_string_helper.h"
 #include "chassis.h"
-#include "gpu_validation.h"
+#include "gpu_assisted_validation.h"
 #include "vk_layer_utils.h"
 
 uint32_t GpuVal::GetQueueState(VkQueue queue) {

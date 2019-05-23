@@ -470,7 +470,7 @@ bool wrap_handles = false;
 #include "stateless_validation.h"
 #endif
 #if BUILD_CORE_VALIDATION
-#include "gpu_validation.h"
+#include "gpu_assisted_validation.h"
 #endif
 
 namespace vulkan_layer_chassis {

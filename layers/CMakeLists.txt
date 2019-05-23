@@ -198,13 +198,13 @@ set(CHASSIS_LIBRARY_FILES
     layer_chassis_dispatch.cpp)
 
 set(CORE_VALIDATION_LIBRARY_FILES
-    gpu_validation_intercepts.cpp
+    gpu_assisted_val_intercepts.cpp
     #drawdispatch.cpp
     #convert_to_renderpass2.cpp
     #descriptor_sets.cpp
     #buffer_validation.cpp
     #shader_validation.cpp
-    gpu_validation.cpp
+    gpu_assisted_validation.cpp
     xxhash.c)
 
 set(OBJECT_LIFETIMES_LIBRARY_FILES

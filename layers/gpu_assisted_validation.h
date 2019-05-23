@@ -847,10 +847,6 @@ class GpuVal : public ValidationObject {
     void PreCallRecordCmdDrawMeshTasksIndirectCountNV(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
                                                       VkBuffer countBuffer, VkDeviceSize countBufferOffset, uint32_t maxDrawCount,
                                                       uint32_t stride);
-    bool PreCallValidateCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t count,
-                                                const VkGraphicsPipelineCreateInfo* pCreateInfos,
-                                                const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines,
-                                                void* cgpl_state_data);
     void ResetCommandBufferState(const VkCommandBuffer cb);
     PIPELINE_LAYOUT_STATE const* GetPipelineLayout(VkPipelineLayout pipeLayout);
     void FreeCommandBufferStates(COMMAND_POOL_STATE* pool_state, const uint32_t command_buffer_count,
