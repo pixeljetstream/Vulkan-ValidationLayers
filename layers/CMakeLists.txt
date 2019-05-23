@@ -222,6 +222,11 @@ set(STATELESS_VALIDATION_LIBRARY_FILES
     parameter_validation.h
     parameter_validation_utils.cpp)
 
+set(GPU_ASSISTED_VALIDATION_LIBRARY_FILES
+    gpu_assisted_validation.cpp
+    gpu_assisted_validation.h
+    gpu_assisted_val_intercepts.cpp)
+
 # Inter-layer dependencies are temporarily necessary to serialize layer builds which avoids contention for common generated files
 if(BUILD_LAYERS)
     AddVkLayer(core_validation "BUILD_CORE_VALIDATION"
@@ -241,6 +246,7 @@ if(BUILD_LAYERS)
         ${CORE_VALIDATION_LIBRARY_FILES}
         ${OBJECT_LIFETIMES_LIBRARY_FILES}
         ${THREAD_SAFETY_LIBRARY_FILES}
+        ${GPU_ASSISTED_VALIDATION_LIBRARY_FILES}
         ${STATELESS_VALIDATION_LIBRARY_FILES})
     add_dependencies(VkLayer_khronos_validation VkLayer_unique_objects)
 

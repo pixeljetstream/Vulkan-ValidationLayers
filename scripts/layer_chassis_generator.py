@@ -239,6 +239,7 @@ enum LayerObjectTypeId {
     LayerObjectTypeParameterValidation,         // Instance or device parameter validation layer object
     LayerObjectTypeObjectTracker,               // Instance or device object tracker layer object
     LayerObjectTypeCoreValidation,              // Instance or device core validation layer object
+    LayerObjectTypeGpuAssistedValidation,       // Instance or device gpu assisted validation layer object
 };
 
 struct TEMPLATE_STATE {
@@ -471,6 +472,9 @@ bool wrap_handles = false;
 #endif
 #if BUILD_CORE_VALIDATION
 #include "core_validation.h"
+#endif
+#if BUILD_KHRONOS_VALIDATION
+#include "gpu_assisted_validation.h"
 #endif
 
 namespace vulkan_layer_chassis {
@@ -821,7 +825,14 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo *pCreat
     core_checks->container_type = LayerObjectTypeCoreValidation;
     core_checks->api_version = api_version;
 #endif
-
+#if BUILD_KHRONOS_VALIDATION
+    auto gpu_val = new GpuVal;
+    if (local_enables.gpu_validation) {
+        local_object_dispatch.emplace_back(gpu_val);
+    }
+    gpu_val->container_type = LayerObjectTypeGpuAssistedValidation;
+    gpu_val->api_version = api_version;
+#endif
     // If handle wrapping is disabled via the ValidationFeatures extension, override build flag
     if (local_disables.handle_wrapping) {
         wrap_handles = false;
@@ -879,6 +890,14 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo *pCreat
     core_checks->enabled = framework->enabled;
     core_checks->disabled = framework->disabled;
     core_checks->instance_state = core_checks;
+#endif
+#if BUILD_KHRONOS_VALIDATION
+    gpu_val->report_data = framework->report_data;
+    gpu_val->instance_dispatch_table = framework->instance_dispatch_table;
+    gpu_val->instance = *pInstance;
+    gpu_val->enabled = framework->enabled;
+    gpu_val->disabled = framework->disabled;
+    gpu_val->instance_state = gpu_val;
 #endif
 
     for (auto intercept : framework->object_dispatch) {
@@ -1020,6 +1039,16 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const VkDevice
         device_interceptor->object_dispatch.emplace_back(core_checks);
     }
 #endif
+#if BUILD_KHRONOS_VALIDATION
+    auto gpu_val = new GpuVal;
+    gpu_val->container_type = LayerObjectTypeCoreValidation;
+    gpu_val->instance_state = reinterpret_cast<GpuVal *>(
+        gpu_val->GetValidationObject(instance_interceptor->object_dispatch, LayerObjectTypeGpuAssistedValidation));
+    if (instance_interceptor->enabled.gpu_val) {
+        device_interceptor->object_dispatch.emplace_back(gpu_val);
+    }
+#endif
+
 
     // Set per-intercept common data items
     for (auto dev_intercept : device_interceptor->object_dispatch) {
