@@ -1114,7 +1114,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(
     auto layer_data = GetLayerDataPtr(get_dispatch_key(device), layer_data_map);
     bool skip = false;
 
-#ifdef BUILD_CORE_VALIDATION
+#if defined(BUILD_CORE_VALIDATION) || defined(BUILD_KHRONOS_VALIDATION)
         create_graphics_pipeline_api_state cgpl_state{};
 #else
         struct create_graphics_pipeline_api_state {
@@ -1153,7 +1153,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(
     auto layer_data = GetLayerDataPtr(get_dispatch_key(device), layer_data_map);
     bool skip = false;
 
-#ifdef BUILD_CORE_VALIDATION
+#if defined(BUILD_CORE_VALIDATION) || defined(BUILD_KHRONOS_VALIDATION)
     create_compute_pipeline_api_state ccpl_state{};
 #else
     struct create_compute_pipeline_api_state {
@@ -1189,7 +1189,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateRayTracingPipelinesNV(
     auto layer_data = GetLayerDataPtr(get_dispatch_key(device), layer_data_map);
     bool skip = false;
 
-#ifndef BUILD_CORE_VALIDATION
+#if !defined(BUILD_CORE_VALIDATION) && !defined(BUILD_KHRONOS_VALIDATION)
     struct PIPELINE_STATE {};
 #endif
 
@@ -1221,7 +1221,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreatePipelineLayout(
     auto layer_data = GetLayerDataPtr(get_dispatch_key(device), layer_data_map);
     bool skip = false;
 
-#ifndef BUILD_CORE_VALIDATION
+#if !defined(BUILD_KHRONOS_VALIDATION)
     struct create_pipeline_layout_api_state {
         VkPipelineLayoutCreateInfo modified_create_info;
     };
@@ -1255,7 +1255,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateShaderModule(
     auto layer_data = GetLayerDataPtr(get_dispatch_key(device), layer_data_map);
     bool skip = false;
 
-#ifndef BUILD_CORE_VALIDATION
+#if !defined(BUILD_CORE_VALIDATION) && !defined(BUILD_KHRONOS_VALIDATION)
     struct create_shader_module_api_state {
         VkShaderModuleCreateInfo instrumented_create_info;
     };
@@ -1287,7 +1287,7 @@ VKAPI_ATTR VkResult VKAPI_CALL AllocateDescriptorSets(
     auto layer_data = GetLayerDataPtr(get_dispatch_key(device), layer_data_map);
     bool skip = false;
 
-#ifdef BUILD_CORE_VALIDATION
+#if defined(BUILD_CORE_VALIDATION) || defined(BUILD_KHRONOS_VALIDATION)
     cvdescriptorset::AllocateDescriptorSetsData ads_state(pAllocateInfo->descriptorSetCount);
 #else
     struct ads_state {} ads_state;

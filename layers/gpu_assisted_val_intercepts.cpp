@@ -142,7 +142,7 @@ CMD_BUFFER_STATE *GpuVal::GetCBState(const VkCommandBuffer cb) {
     return it->second.get();
 }
 
-static void AddCommandBufferBinding(std::unordered_set<CMD_BUFFER_STATE *> *cb_bindings, VK_OBJECT obj, CMD_BUFFER_STATE *cb_node) {
+static void AddCommandBufferBinding(std::unordered_set<CMD_BUFFER_STATE *> *cb_bindings, CMD_BUFFER_STATE *cb_node) {
     cb_bindings->insert(cb_node);
 }
 // Reset the command buffer state
@@ -1034,7 +1034,7 @@ void GpuVal::PreCallRecordCmdBindPipeline(VkCommandBuffer commandBuffer, VkPipel
 
     auto pipe_state = GetPipelineState(pipeline);
     cb_state->lastBound[pipelineBindPoint].pipeline_state = pipe_state;
-    AddCommandBufferBinding(&pipe_state->cb_bindings, {HandleToUint64(pipeline), kVulkanObjectTypePipeline}, cb_state);
+    AddCommandBufferBinding(&pipe_state->cb_bindings, cb_state);
 }
 
 void GpuVal::PreCallRecordCmdPushDescriptorSetKHR(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,

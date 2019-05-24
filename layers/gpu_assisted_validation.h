@@ -43,12 +43,7 @@ class GpuVal;
 
 class BASE_NODE {
    public:
-    // Track command buffers that this object is bound to
-    //  binding initialized when cmd referencing object is bound to command buffer
-    //  binding removed when command buffer is reset or destroyed
-    // When an object is destroyed, any bound cbs are set to INVALID
     std::unordered_set<CMD_BUFFER_STATE*> cb_bindings;
-
     BASE_NODE(){};
 };
 
@@ -56,12 +51,6 @@ class BASE_NODE {
 struct COMMAND_POOL_STATE : public BASE_NODE {
     uint32_t queueFamilyIndex;
     std::unordered_set<VkCommandBuffer> commandBuffers;
-};
-
-// Generic wrapper for vulkan objects
-struct VK_OBJECT {
-    uint64_t handle;
-    VulkanObjectType type;
 };
 
 // Flags describing requirements imposed by the pipeline on a descriptor
