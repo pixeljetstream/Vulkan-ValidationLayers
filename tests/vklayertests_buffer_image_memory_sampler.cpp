@@ -3342,7 +3342,7 @@ TEST_F(VkLayerTest, InvalidBufferViewCreateInfoEntries) {
 
     // Offset must be a multiple of VkPhysicalDeviceLimits::minTexelBufferOffsetAlignment so add 1 to ensure it is not
     buff_view_ci.offset = minTexelBufferOffsetAlignment + 1;
-    CreateBufferViewTest(*this, &buff_view_ci, "VUID-VkBufferViewCreateInfo-offset-00926");
+    CreateBufferViewTest(*this, &buff_view_ci, "VUID-VkBufferViewCreateInfo-offset-02749");
 
     // Set offset to acceptable value for range tests
     buff_view_ci.offset = minTexelBufferOffsetAlignment;
