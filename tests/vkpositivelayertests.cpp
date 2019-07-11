@@ -7573,7 +7573,7 @@ TEST_F(VkPositiveLayerTest, TransferImageToSwapchainDeviceGroup) {
     create_device_pnext.sType = VK_STRUCTURE_TYPE_DEVICE_GROUP_DEVICE_CREATE_INFO;
     create_device_pnext.physicalDeviceCount = physical_device_group[0].physicalDeviceCount;
     create_device_pnext.pPhysicalDevices = physical_device_group[0].physicalDevices;
-    ASSERT_NO_FATAL_FAILURE(InitState(nullptr, &create_device_pnext, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT));
+    ASSERT_NO_FATAL_FAILURE(InitState(nullptr, &create_device_pnext));
     ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
     if (!InitSwapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
         printf("%s Cannot create surface or swapchain, skipping test\n", kSkipPrefix);
@@ -7647,12 +7647,6 @@ TEST_F(VkPositiveLayerTest, TransferImageToSwapchainDeviceGroup) {
     vkCmdPipelineBarrier(m_commandBuffer->handle(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0,
                          nullptr, 0, nullptr, 1, &img_barrier);
 
-    m_commandBuffer->end();
-    m_commandBuffer->QueueCommandBuffer();
-
-    m_commandBuffer->reset();
-    m_commandBuffer->begin();
-
     VkImageCopy copy_region = {};
     copy_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     copy_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -7675,4 +7669,152 @@ TEST_F(VkPositiveLayerTest, TransferImageToSwapchainDeviceGroup) {
 
     vkDestroyImage(m_device->device(), peer_image, NULL);
     DestroySwapchain();
+}
+
+TEST_F(VkPositiveLayerTest, TestMulitplanarAliasImage) {
+    TEST_DESCRIPTION("Test VK_IMAGE_CREATE_ALIAS_BIT in mulit-planar situations");
+    // Enable KHR multiplane req'd extensions
+    bool supported = InstanceExtensionSupported(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+                                                VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_SPEC_VERSION);
+    if (supported) {
+        m_instance_extension_names.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    }
+    SetTargetApiVersion(VK_API_VERSION_1_1);
+    ASSERT_NO_FATAL_FAILURE(InitFramework(myDbgFunc, m_errorMonitor));
+    if (DeviceValidationVersion() < VK_API_VERSION_1_1) {
+        printf("%s VK_IMAGE_CREATE_ALIAS_BIT requires Vulkan 1.1+, skipping test\n", kSkipPrefix);
+        return;
+    }
+    supported = supported && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+    supported = supported && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+    supported = supported && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+    if (supported) {
+        m_device_extension_names.push_back(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+        m_device_extension_names.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+        m_device_extension_names.push_back(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+    } else {
+        printf("%s test requires KHR multiplane extensions, not available.  Skipping.\n", kSkipPrefix);
+        return;
+    }
+
+    ASSERT_NO_FATAL_FAILURE(InitState());
+    ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
+
+    auto image_create_info = lvl_init_struct<VkImageCreateInfo>();
+    image_create_info.imageType = VK_IMAGE_TYPE_2D;
+    image_create_info.format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+    image_create_info.extent.width = 64;
+    image_create_info.extent.height = 64;
+    image_create_info.extent.depth = 1;
+    image_create_info.mipLevels = 1;
+    image_create_info.arrayLayers = 1;
+    image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
+    image_create_info.initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+    image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    supported =
+        supported && ImageFormatAndFeaturesSupported(
+                         instance(), gpu(), image_create_info,
+                         VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_DISJOINT_BIT);
+    if (!supported) {
+        printf("%s Image format not supported.   Skipping test.\n", kSkipPrefix);
+        return;
+    }
+
+    VkImageObj src_Image(m_device);
+    src_Image.init(&image_create_info);
+
+    image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_create_info.flags = VK_IMAGE_CREATE_ALIAS_BIT | VK_IMAGE_CREATE_DISJOINT_BIT;
+
+    VkImage dst_image;
+    vkCreateImage(device(), &image_create_info, NULL, &dst_image);
+
+    // Allocate & bind memory
+    VkPhysicalDeviceMemoryProperties2 phys_mem_props2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    vkGetPhysicalDeviceMemoryProperties2(gpu(), &phys_mem_props2);
+    VkImagePlaneMemoryRequirementsInfo image_plane_req = {VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO};
+    VkImageMemoryRequirementsInfo2 mem_req_info2 = {
+        VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
+    };
+    mem_req_info2.pNext = &image_plane_req;
+    mem_req_info2.image = dst_image;
+    VkMemoryRequirements2 mem_reqs2 = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+
+    VkDeviceMemory mem_obj = VK_NULL_HANDLE;
+    VkMemoryPropertyFlagBits mem_props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    VkMemoryAllocateInfo alloc_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+
+    image_plane_req.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    vkGetImageMemoryRequirements2(device(), &mem_req_info2, &mem_reqs2);
+
+    uint32_t mem_type = 0;
+    for (mem_type = 0; mem_type < phys_mem_props2.memoryProperties.memoryTypeCount; mem_type++) {
+        if ((mem_reqs2.memoryRequirements.memoryTypeBits & (1 << mem_type)) &&
+            ((phys_mem_props2.memoryProperties.memoryTypes[mem_type].propertyFlags & mem_props) == mem_props)) {
+            alloc_info.memoryTypeIndex = mem_type;
+            break;
+        }
+    }
+    alloc_info.allocationSize = mem_reqs2.memoryRequirements.size;
+    ASSERT_VK_SUCCESS(vkAllocateMemory(device(), &alloc_info, NULL, &mem_obj));
+    VkBindImageMemoryInfo bind_info;
+    bind_info.sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO;
+    bind_info.pNext = nullptr;
+    bind_info.image = dst_image;
+    bind_info.memoryOffset = 0;
+    bind_info.memory = mem_obj;
+    vkBindImageMemory2(device(), 1, &bind_info);
+
+    image_create_info.format = VK_FORMAT_R8_UNORM;
+    image_create_info.extent.width = 32;
+    image_create_info.extent.height = 32;
+
+    VkImage alias_image;
+    m_errorMonitor->SetUnexpectedError("VUID_Undefined");
+    vkCreateImage(device(), &image_create_info, NULL, &alias_image);
+    bind_info.image = alias_image;
+    vkBindImageMemory2(device(), 1, &bind_info);
+
+    m_commandBuffer->begin();
+
+    auto img_barrier = lvl_init_struct<VkImageMemoryBarrier>();
+    img_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    img_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    img_barrier.image = alias_image;
+    img_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    img_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    img_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    img_barrier.subresourceRange.baseArrayLayer = 0;
+    img_barrier.subresourceRange.baseMipLevel = 0;
+    img_barrier.subresourceRange.layerCount = 1;
+    img_barrier.subresourceRange.levelCount = 1;
+    vkCmdPipelineBarrier(m_commandBuffer->handle(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0,
+                         nullptr, 0, nullptr, 1, &img_barrier);
+
+    VkImageCopy copy_region = {};
+    copy_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    copy_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    copy_region.srcSubresource.mipLevel = 0;
+    copy_region.dstSubresource.mipLevel = 0;
+    copy_region.srcSubresource.baseArrayLayer = 0;
+    copy_region.dstSubresource.baseArrayLayer = 0;
+    copy_region.srcSubresource.layerCount = 1;
+    copy_region.dstSubresource.layerCount = 1;
+    copy_region.srcOffset = {0, 0, 0};
+    copy_region.dstOffset = {0, 0, 0};
+    copy_region.extent = {10, 10, 1};
+    vkCmdCopyImage(m_commandBuffer->handle(), src_Image.handle(), VK_IMAGE_LAYOUT_GENERAL, dst_image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
+
+    m_commandBuffer->end();
+    m_errorMonitor->ExpectSuccess();
+    m_commandBuffer->QueueCommandBuffer();
+    m_errorMonitor->VerifyNotFound();
+
+    vkFreeMemory(m_device->device(), mem_obj, NULL);
+    vkDestroyImage(m_device->device(), dst_image, NULL);
+    vkDestroyImage(m_device->device(), alias_image, NULL);
 }
