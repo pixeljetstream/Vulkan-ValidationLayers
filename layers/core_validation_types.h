@@ -305,6 +305,8 @@ class IMAGE_STATE : public BINDABLE {
     VkSwapchainKHR create_from_swapchain;
     VkSwapchainKHR bind_swapchain;
     uint32_t bind_swapchain_imageIndex;
+    VkExternalMemoryHandleTypeFlags external_memory_handle_types;
+    VkExternalMemoryHandleTypeFlagsNV external_memory_handle_typesNV;
 
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
     uint64_t external_format_android;

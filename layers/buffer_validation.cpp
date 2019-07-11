@@ -68,6 +68,8 @@ IMAGE_STATE::IMAGE_STATE(VkImage img, const VkImageCreateInfo *pCreateInfo)
       create_from_swapchain(VK_NULL_HANDLE),
       bind_swapchain(VK_NULL_HANDLE),
       bind_swapchain_imageIndex(0),
+      external_memory_handle_types(VkExternalMemoryHandleTypeFlags(0)),
+      external_memory_handle_typesNV(VkExternalMemoryHandleTypeFlagsNV(0)),
       sparse_requirements{} {
     if ((createInfo.sharingMode == VK_SHARING_MODE_CONCURRENT) && (createInfo.queueFamilyIndexCount > 0)) {
         uint32_t *pQueueFamilyIndices = new uint32_t[createInfo.queueFamilyIndexCount];
@@ -1520,11 +1522,16 @@ bool CoreChecks::PreCallValidateCreateImage(VkDevice device, const VkImageCreate
 
     if (!FormatIsMultiplane(pCreateInfo->format) && !(pCreateInfo->flags & VK_IMAGE_CREATE_ALIAS_BIT) &&
         (pCreateInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT)) {
-        skip |=
-            log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, 0,
-                    "VUID-VkImageCreateInfo-format-01577",
-                    "vkCreateImage(): format is %s and flags are %d. The flags should not include VK_IMAGE_CREATE_DISJOINT_BIT.",
-                    string_VkFormat(pCreateInfo->format), pCreateInfo->flags);
+        const auto extenal_memory_info = lvl_find_in_chain<VkExternalMemoryImageCreateInfo>(pCreateInfo->pNext);
+        const auto extenal_memory_nv_info = lvl_find_in_chain<VkExternalMemoryImageCreateInfoNV>(pCreateInfo->pNext);
+        if ((!extenal_memory_info || extenal_memory_info->handleTypes == 0) &&
+            (!extenal_memory_nv_info || extenal_memory_nv_info->handleTypes == 0)) {
+            skip |= log_msg(
+                report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, 0,
+                "VUID-VkImageCreateInfo-format-01577",
+                "vkCreateImage(): format is %s and flags are %d. The flags should not include VK_IMAGE_CREATE_DISJOINT_BIT.",
+                string_VkFormat(pCreateInfo->format), pCreateInfo->flags);
+        }
     }
     return skip;
 }
@@ -1539,6 +1546,17 @@ void ValidationStateTracker::PostCallRecordCreateImage(VkDevice device, const Vk
     const auto swapchain_info = lvl_find_in_chain<VkImageSwapchainCreateInfoKHR>(pCreateInfo->pNext);
     if (swapchain_info) {
         is_node->create_from_swapchain = swapchain_info->swapchain;
+    }
+    const auto extenal_memory_info = lvl_find_in_chain<VkExternalMemoryImageCreateInfo>(pCreateInfo->pNext);
+    if (extenal_memory_info) {
+        is_node->external_memory_handle_types = extenal_memory_info->handleTypes;
+    }
+    const auto extenal_memory_nv_info = lvl_find_in_chain<VkExternalMemoryImageCreateInfoNV>(pCreateInfo->pNext);
+    if (extenal_memory_nv_info) {
+        is_node->external_memory_handle_types = extenal_memory_nv_info->handleTypes;
+    }
+    if (is_node->external_memory_handle_types || is_node->external_memory_handle_types) {
+        is_node->createInfo.flags |= VK_IMAGE_CREATE_ALIAS_BIT;
     }
     imageMap.insert(std::make_pair(*pImage, std::unique_ptr<IMAGE_STATE>(is_node)));
 }
