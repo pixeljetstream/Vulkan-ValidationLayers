@@ -1106,19 +1106,23 @@ void CoreChecks::TransitionImageLayouts(CMD_BUFFER_STATE *cb_state, uint32_t mem
 
         auto *image_state = GetImageState(mem_barrier->image);
         if (!image_state) continue;
+        auto images = image_state->aliasing_images;
+        images.insert(image_state->image);
+        for (const auto &image : images) {
+            auto is = GetImageState(image);
+            VkImageSubresourceRange normalized_isr = NormalizeSubresourceRange(*is, mem_barrier->subresourceRange);
+            const auto &image_create_info = is->createInfo;
 
-        VkImageSubresourceRange normalized_isr = NormalizeSubresourceRange(*image_state, mem_barrier->subresourceRange);
-        const auto &image_create_info = image_state->createInfo;
+            // Special case for 3D images with VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT_KHR flag bit, where <extent.depth> and
+            // <arrayLayers> can potentially alias. When recording layout for the entire image, pre-emptively record layouts
+            // for all (potential) layer sub_resources.
+            if (0 != (image_create_info.flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT_KHR)) {
+                normalized_isr.baseArrayLayer = 0;
+                normalized_isr.layerCount = image_create_info.extent.depth;  // Treat each depth slice as a layer subresource
+            }
 
-        // Special case for 3D images with VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT_KHR flag bit, where <extent.depth> and
-        // <arrayLayers> can potentially alias. When recording layout for the entire image, pre-emptively record layouts
-        // for all (potential) layer sub_resources.
-        if (0 != (image_create_info.flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT_KHR)) {
-            normalized_isr.baseArrayLayer = 0;
-            normalized_isr.layerCount = image_create_info.extent.depth;  // Treat each depth slice as a layer subresource
+            SetImageLayout(cb_state, *is, normalized_isr, mem_barrier->newLayout, mem_barrier->oldLayout);
         }
-
-        SetImageLayout(cb_state, *image_state, normalized_isr, mem_barrier->newLayout, mem_barrier->oldLayout);
     }
 }
 
