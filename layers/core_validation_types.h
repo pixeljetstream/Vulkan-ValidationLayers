@@ -314,6 +314,11 @@ class IMAGE_STATE : public BINDABLE {
     IMAGE_STATE(VkImage img, const VkImageCreateInfo *pCreateInfo);
     IMAGE_STATE(IMAGE_STATE const &rh_obj) = delete;
 
+    std::unordered_set<VkImage> aliasing_images;
+    bool IsMultiplanarCompatibleForAliasing(VkImageCreateInfo &other_createInfo);
+    bool IsCreateInfoCompatibleForAliasing(VkImageCreateInfo &other_createInfo);
+    bool IsCompatibleAliasing(IMAGE_STATE &other_image_state);
+
     ~IMAGE_STATE() {
         if ((createInfo.sharingMode == VK_SHARING_MODE_CONCURRENT) && (createInfo.queueFamilyIndexCount > 0)) {
             delete[] createInfo.pQueueFamilyIndices;

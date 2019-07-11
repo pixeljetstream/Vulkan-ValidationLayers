@@ -1362,3 +1362,18 @@ VK_LAYER_EXPORT bool FormatSizesAreEqual(VkFormat srcFormat, VkFormat dstFormat,
 VK_LAYER_EXPORT bool FormatRequiresYcbcrConversion(VkFormat format) {
     return format >= VK_FORMAT_G8B8G8R8_422_UNORM && format <= VK_FORMAT_G16_B16_R16_3PLANE_444_UNORM;
 }
+
+VK_LAYER_EXPORT bool MultiplanarFormatIsCompatiblePlaneFormat(VkFormat mp_fmt, VkExtent3D &mp_extent, VkFormat sp_fmt,
+                                                              VkExtent3D &sp_extent) {
+    auto it = vk_multiplane_compatibility_map.find(mp_fmt);
+    if (it == vk_multiplane_compatibility_map.end()) return false;
+
+    for (uint32_t i = 0; i < VK_MULTIPLANE_FORMAT_MAX_PLANES; ++i) {
+        if ((it->second.per_plane[i].compatible_format == sp_fmt) &&
+            (mp_extent.width == (sp_extent.width * it->second.per_plane[i].width_divisor)) &&
+            (mp_extent.height == (sp_extent.height * it->second.per_plane[i].height_divisor))) {
+            return true;
+        }
+    }
+    return false;
+}

@@ -132,6 +132,83 @@ IMAGE_VIEW_STATE *ValidationStateTracker::GetAttachmentImageViewState(FRAMEBUFFE
     return GetImageViewState(image_view);
 }
 
+std::unordered_map<uint64_t, std::unordered_set<VkImage>> ValidationStateTracker::aliasing_images;
+
+std::unordered_set<VkImage> ValidationStateTracker::GetAliasingImages(IMAGE_STATE &image_state) {
+    std::unordered_set<VkImage> images;
+    if (!(image_state.createInfo.flags & VK_IMAGE_CREATE_ALIAS_BIT)) return images;
+
+    uint64_t handle = 0;
+    if (image_state.create_from_swapchain) {
+        handle = HandleToUint64(image_state.create_from_swapchain);
+    } else {
+        handle = HandleToUint64(image_state.binding.mem);
+    }
+    std::unordered_map<uint64_t, std::unordered_set<VkImage>>::iterator it = aliasing_images.find(handle);
+    if (it == aliasing_images.end() || it->second.empty()) return images;
+
+    for (const auto &image : it->second) {
+        if (image != image_state.image) {
+            auto is = GetImageState(image);
+            if (is && is->IsCompatibleAliasing(image_state)) {
+                images.insert(image);
+            }
+        }
+    }
+    return images;
+}
+
+void ValidationStateTracker::AddAliasingImage(IMAGE_STATE &image_state) {
+    if (!(image_state.createInfo.flags & VK_IMAGE_CREATE_ALIAS_BIT)) return;
+    uint64_t handle = 0;
+    if (image_state.create_from_swapchain) {
+        handle = HandleToUint64(image_state.create_from_swapchain);
+    } else {
+        handle = HandleToUint64(image_state.binding.mem);
+    }
+    std::unordered_map<uint64_t, std::unordered_set<VkImage>>::iterator it = aliasing_images.find(handle);
+    if (it == aliasing_images.end()) {
+        std::unordered_set<VkImage> images({image_state.image});
+        aliasing_images.insert({handle, images});
+    } else {
+        it->second.insert(image_state.image);
+    }
+    image_state.aliasing_images = GetAliasingImages(image_state);
+}
+
+void ValidationStateTracker::RemoveAliasingImage(IMAGE_STATE &image_state) {
+    if (!(image_state.createInfo.flags & VK_IMAGE_CREATE_ALIAS_BIT)) return;
+    uint64_t handle = 0;
+    if (image_state.create_from_swapchain) {
+        handle = HandleToUint64(image_state.create_from_swapchain);
+    } else {
+        handle = HandleToUint64(image_state.binding.mem);
+    }
+    std::unordered_map<uint64_t, std::unordered_set<VkImage>>::iterator it = aliasing_images.find(handle);
+    if (it != aliasing_images.end()) {
+        it->second.erase(image_state.image);
+        for (const auto &image : image_state.aliasing_images) {
+            auto is = GetImageState(image);
+            if (is) {
+                is->aliasing_images.erase(image_state.image);
+            }
+        }
+    }
+}
+
+void ValidationStateTracker::RemoveAliasingImages(uint64_t handle) {
+    std::unordered_map<uint64_t, std::unordered_set<VkImage>>::iterator it = aliasing_images.find(handle);
+    if (it != aliasing_images.end()) {
+        for (const auto &image : it->second) {
+            auto is = GetImageState(image);
+            if (is) {
+                is->aliasing_images.clear();
+            }
+        }
+        aliasing_images.erase(it);
+    }
+}
+
 EVENT_STATE *ValidationStateTracker::GetEventState(VkEvent event) {
     auto it = eventMap.find(event);
     if (it == eventMap.end()) {
@@ -3694,6 +3771,7 @@ void CoreChecks::PreCallRecordFreeMemory(VkDevice device, VkDeviceMemory mem, co
     // Any bound cmd buffers are now invalid
     InvalidateCommandBuffers(mem_info->cb_bindings, obj_struct);
     memObjMap.erase(mem);
+    RemoveAliasingImages(HandleToUint64(mem));
 }
 
 // Validate that given Map memory range is valid. This means that the memory should not already be mapped,
@@ -10689,6 +10767,9 @@ void CoreChecks::UpdateBindImageMemoryState(const VkBindImageMemoryInfo &bindInf
             SetMemBinding(bindInfo.memory, image_state, bindInfo.memoryOffset,
                           VulkanTypedHandle(bindInfo.image, kVulkanObjectTypeImage));
         }
+        if (image_state->createInfo.flags & VK_IMAGE_CREATE_ALIAS_BIT) {
+            AddAliasingImage(*image_state);
+        }
     }
 }
 
@@ -11574,6 +11655,7 @@ void CoreChecks::PreCallRecordDestroySwapchainKHR(VkDevice device, VkSwapchainKH
         }
 
         swapchainMap.erase(swapchain);
+        RemoveAliasingImages(HandleToUint64(swapchain));
     }
 }
 

@@ -101,6 +101,70 @@ IMAGE_STATE::IMAGE_STATE(VkImage img, const VkImageCreateInfo *pCreateInfo)
 #endif  // VK_USE_PLATFORM_ANDROID_KHR
 }
 
+bool IMAGE_STATE::IsMultiplanarCompatibleForAliasing(VkImageCreateInfo &other_createInfo) {
+    bool b_multiplanar = FormatIsMultiplane(createInfo.format);
+    bool b_other_multiplanar = FormatIsMultiplane(other_createInfo.format);
+
+    if (b_multiplanar == b_other_multiplanar)
+        return ((createInfo.format == other_createInfo.format) && (createInfo.extent.width == other_createInfo.extent.width) &&
+                (createInfo.extent.height == other_createInfo.extent.height) && (createInfo.tiling == other_createInfo.tiling));
+
+    if (!(createInfo.flags & other_createInfo.flags & VK_IMAGE_CREATE_DISJOINT_BIT)) return false;
+    if (b_multiplanar) {
+        if (!MultiplanarFormatIsCompatiblePlaneFormat(createInfo.format, createInfo.extent, other_createInfo.format,
+                                                      other_createInfo.extent))
+            return false;
+    } else {
+        if (!MultiplanarFormatIsCompatiblePlaneFormat(other_createInfo.format, other_createInfo.extent, createInfo.format,
+                                                      createInfo.extent))
+            return false;
+    }
+
+    if ((createInfo.tiling != other_createInfo.tiling) &&
+        (createInfo.tiling == VK_IMAGE_TILING_OPTIMAL || other_createInfo.tiling == VK_IMAGE_TILING_OPTIMAL)) {
+        return false;
+    }
+    return true;
+}
+
+bool IMAGE_STATE::IsCreateInfoCompatibleForAliasing(VkImageCreateInfo &other_createInfo) {
+    if ((createInfo.sType == other_createInfo.sType) && (createInfo.flags == other_createInfo.flags) &&
+        (createInfo.imageType == other_createInfo.imageType) && (IsMultiplanarCompatibleForAliasing(other_createInfo)) &&
+        (createInfo.mipLevels == other_createInfo.mipLevels) && (createInfo.arrayLayers == other_createInfo.arrayLayers) &&
+        (createInfo.samples == other_createInfo.samples) && (createInfo.usage == other_createInfo.usage) &&
+        (createInfo.sharingMode == other_createInfo.sharingMode) &&
+        (createInfo.queueFamilyIndexCount == other_createInfo.queueFamilyIndexCount) &&
+        (createInfo.initialLayout == other_createInfo.initialLayout) &&
+        (createInfo.extent.depth == other_createInfo.extent.depth)) {
+        if (createInfo.queueFamilyIndexCount > 0) {
+            for (uint32_t i = 0; i < createInfo.queueFamilyIndexCount; ++i) {
+                if (createInfo.pQueueFamilyIndices[i] != other_createInfo.pQueueFamilyIndices[i]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+bool IMAGE_STATE::IsCompatibleAliasing(IMAGE_STATE &other_image_state) {
+    if (!(createInfo.flags & other_image_state.createInfo.flags & VK_IMAGE_CREATE_ALIAS_BIT)) return false;
+    if (other_image_state.create_from_swapchain) {
+        if (create_from_swapchain == other_image_state.create_from_swapchain) {
+            aliasing_images.insert(other_image_state.image);
+            return true;
+        }
+    } else if (create_from_swapchain == VK_NULL_HANDLE) {
+        if ((binding.mem == other_image_state.binding.mem) && (binding.offset == other_image_state.binding.offset) &&
+            IsCreateInfoCompatibleForAliasing(other_image_state.createInfo)) {
+            aliasing_images.insert(other_image_state.image);
+            return true;
+        }
+    }
+    return false;
+}
+
 IMAGE_VIEW_STATE::IMAGE_VIEW_STATE(const IMAGE_STATE *image_state, VkImageView iv, const VkImageViewCreateInfo *ci)
     : image_view(iv), create_info(*ci), normalized_subresource_range(ci->subresourceRange), samplerConversion(VK_NULL_HANDLE) {
     auto *conversionInfo = lvl_find_in_chain<VkSamplerYcbcrConversionInfo>(create_info.pNext);
@@ -1454,6 +1518,14 @@ bool CoreChecks::PreCallValidateCreateImage(VkDevice device, const VkImageCreate
                                       "VUID-VkImageCreateInfo-sharingMode-01420", false);
     }
 
+    if (!FormatIsMultiplane(pCreateInfo->format) && !(pCreateInfo->flags & VK_IMAGE_CREATE_ALIAS_BIT) &&
+        (pCreateInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT)) {
+        skip |=
+            log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, 0,
+                    "VUID-VkImageCreateInfo-format-01577",
+                    "vkCreateImage(): format is %s and flags are %d. The flags should not include VK_IMAGE_CREATE_DISJOINT_BIT.",
+                    string_VkFormat(pCreateInfo->format), pCreateInfo->flags);
+    }
     return skip;
 }
 
@@ -1507,6 +1579,10 @@ void ValidationStateTracker::PreCallRecordDestroyImage(VkDevice device, VkImage 
         if (mem_info) {
             RemoveImageMemoryRange(obj_struct.handle, mem_info);
         }
+    }
+
+    if (image_state->createInfo.flags & VK_IMAGE_CREATE_ALIAS_BIT) {
+        RemoveAliasingImage(*image_state);
     }
     ClearMemoryObjectBindings(obj_struct);
     // Remove image from imageMap

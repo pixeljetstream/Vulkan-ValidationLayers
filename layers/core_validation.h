@@ -245,6 +245,13 @@ class ValidationStateTracker : public ValidationObject {
     VALSTATETRACK_MAP_AND_TRAITS(VkSemaphore, SEMAPHORE_STATE, semaphoreMap)
     VALSTATETRACK_MAP_AND_TRAITS_INSTANCE_SCOPE(VkSurfaceKHR, SURFACE_STATE, surface_map)
 
+    // uint64_t is handle. It accesses only devicememory and swapchain.
+    static std::unordered_map<uint64_t, std::unordered_set<VkImage>> aliasing_images;
+    std::unordered_set<VkImage> GetAliasingImages(IMAGE_STATE& image_state);
+    void AddAliasingImage(IMAGE_STATE& image_state);
+    void RemoveAliasingImage(IMAGE_STATE& image_state);
+    void RemoveAliasingImages(uint64_t handle);
+
    public:
     template <typename State>
     typename AccessorTraits<State>::ReturnType Get(typename AccessorTraits<State>::Handle handle) {
@@ -1113,7 +1120,6 @@ class CoreChecks : public ValidationStateTracker {
 
     bool PreCallValidateCreateBuffer(VkDevice device, const VkBufferCreateInfo* pCreateInfo,
                                      const VkAllocationCallbacks* pAllocator, VkBuffer* pBuffer);
-
 
     bool PreCallValidateCreateBufferView(VkDevice device, const VkBufferViewCreateInfo* pCreateInfo,
                                          const VkAllocationCallbacks* pAllocator, VkBufferView* pView);
