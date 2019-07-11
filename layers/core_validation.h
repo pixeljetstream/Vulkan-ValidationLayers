@@ -191,6 +191,11 @@ struct GpuValidationState;
 #define VALSTATETRACK_MAP_AND_TRAITS_INSTANCE_SCOPE(handle_type, state_type, map_member) \
     VALSTATETRACK_MAP_AND_TRAITS_IMPL(handle_type, state_type, map_member, true)
 
+// WSI Image Objects bypass usual Image Object creation methods.  A special Memory
+// Object value will be used to identify them internally.
+static const VkDeviceMemory MEMTRACKER_SWAP_CHAIN_IMAGE_KEY = (VkDeviceMemory)(-1);
+// 2nd special memory handle used to flag object as unbound from memory
+static const VkDeviceMemory MEMORY_UNBOUND = VkDeviceMemory(~((uint64_t)(0)) - 1);
 class ValidationStateTracker : public ValidationObject {
    public:
     //  TODO -- move to private
