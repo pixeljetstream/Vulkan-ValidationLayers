@@ -1533,8 +1533,8 @@ bool CoreChecks::PreCallValidateCreateImage(VkDevice device, const VkImageCreate
             skip |= log_msg(
                 report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT, 0,
                 "VUID-VkImageCreateInfo-format-01577",
-                "vkCreateImage(): format is %s and flags are %d. The flags should not include VK_IMAGE_CREATE_DISJOINT_BIT.",
-                string_VkFormat(pCreateInfo->format), pCreateInfo->flags);
+                "vkCreateImage(): format is %s and flags are %s. The flags should not include VK_IMAGE_CREATE_DISJOINT_BIT.",
+                string_VkFormat(pCreateInfo->format), string_VkImageCreateFlags(pCreateInfo->flags).c_str());
         }
     }
     return skip;
