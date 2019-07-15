@@ -8774,12 +8774,26 @@ static bool FindDependency(const uint32_t index, const uint32_t dependent, const
     return false;
 }
 
-bool CoreChecks::CheckDependencyExists(const uint32_t subpass, const std::vector<uint32_t> &dependent_subpasses,
+bool CoreChecks::IsImageLayoutReadOnly(VkImageLayout layout) {
+    if ((layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) || (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) ||
+        (layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL) ||
+        (layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL)) {
+        return true;
+    }
+    return false;
+}
+
+bool CoreChecks::CheckDependencyExists(const uint32_t subpass, const VkImageLayout layout,
+                                       const std::vector<uint32_t> &dependent_subpasses,
+                                       const std::vector<VkImageLayout> &dependent_layouts,
                                        const std::vector<DAGNode> &subpass_to_node, bool &skip) {
     bool result = true;
+    bool bImageLayoutReadOnly = IsImageLayoutReadOnly(layout);
     // Loop through all subpasses that share the same attachment and make sure a dependency exists
     for (uint32_t k = 0; k < dependent_subpasses.size(); ++k) {
         if (static_cast<uint32_t>(subpass) == dependent_subpasses[k]) continue;
+        if (bImageLayoutReadOnly && IsImageLayoutReadOnly(dependent_layouts[k])) continue;
+
         const DAGNode &node = subpass_to_node[subpass];
         // Check for a specified dependency between the two nodes. If one exists we are done.
         auto prev_elem = std::find(node.prev.begin(), node.prev.end(), dependent_subpasses[k]);
@@ -8854,7 +8868,9 @@ bool CoreChecks::ValidateDependencies(FRAMEBUFFER_STATE const *framebuffer, REND
     auto const pCreateInfo = renderPass->createInfo.ptr();
     auto const &subpass_to_node = renderPass->subpassToNode;
     std::vector<std::vector<uint32_t>> output_attachment_to_subpass(pCreateInfo->attachmentCount);
+    std::vector<std::vector<VkImageLayout>> output_layout_to_subpass(pCreateInfo->attachmentCount);
     std::vector<std::vector<uint32_t>> input_attachment_to_subpass(pCreateInfo->attachmentCount);
+    std::vector<std::vector<VkImageLayout>> input_layout_to_subpass(pCreateInfo->attachmentCount);
     std::vector<std::vector<uint32_t>> overlapping_attachments(pCreateInfo->attachmentCount);
     // Find overlapping attachments
     for (uint32_t i = 0; i < pCreateInfo->attachmentCount; ++i) {
@@ -8900,24 +8916,30 @@ bool CoreChecks::ValidateDependencies(FRAMEBUFFER_STATE const *framebuffer, REND
             uint32_t attachment = subpass.pInputAttachments[j].attachment;
             if (attachment == VK_ATTACHMENT_UNUSED) continue;
             input_attachment_to_subpass[attachment].push_back(i);
+            input_layout_to_subpass[attachment].push_back(subpass.pInputAttachments[j].layout);
             for (auto overlapping_attachment : overlapping_attachments[attachment]) {
                 input_attachment_to_subpass[overlapping_attachment].push_back(i);
+                input_layout_to_subpass[overlapping_attachment].push_back(subpass.pInputAttachments[j].layout);
             }
         }
         for (uint32_t j = 0; j < subpass.colorAttachmentCount; ++j) {
             uint32_t attachment = subpass.pColorAttachments[j].attachment;
             if (attachment == VK_ATTACHMENT_UNUSED) continue;
             output_attachment_to_subpass[attachment].push_back(i);
+            output_layout_to_subpass[attachment].push_back(subpass.pColorAttachments[j].layout);
             for (auto overlapping_attachment : overlapping_attachments[attachment]) {
                 output_attachment_to_subpass[overlapping_attachment].push_back(i);
+                output_layout_to_subpass[overlapping_attachment].push_back(subpass.pColorAttachments[j].layout);
             }
             attachmentIndices.insert(attachment);
         }
         if (subpass.pDepthStencilAttachment && subpass.pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED) {
             uint32_t attachment = subpass.pDepthStencilAttachment->attachment;
             output_attachment_to_subpass[attachment].push_back(i);
+            output_layout_to_subpass[attachment].push_back(subpass.pDepthStencilAttachment->layout);
             for (auto overlapping_attachment : overlapping_attachments[attachment]) {
                 output_attachment_to_subpass[overlapping_attachment].push_back(i);
+                output_layout_to_subpass[overlapping_attachment].push_back(subpass.pDepthStencilAttachment->layout);
             }
 
             if (attachmentIndices.count(attachment)) {
@@ -8935,19 +8957,24 @@ bool CoreChecks::ValidateDependencies(FRAMEBUFFER_STATE const *framebuffer, REND
         for (uint32_t j = 0; j < subpass.inputAttachmentCount; ++j) {
             uint32_t attachment = subpass.pInputAttachments[j].attachment;
             if (attachment == VK_ATTACHMENT_UNUSED) continue;
-            CheckDependencyExists(i, output_attachment_to_subpass[attachment], subpass_to_node, skip);
+            CheckDependencyExists(i, subpass.pInputAttachments[j].layout, output_attachment_to_subpass[attachment],
+                                  output_layout_to_subpass[attachment], subpass_to_node, skip);
         }
         // If the attachment is an output then all subpasses that use the attachment must have a dependency relationship
         for (uint32_t j = 0; j < subpass.colorAttachmentCount; ++j) {
             uint32_t attachment = subpass.pColorAttachments[j].attachment;
             if (attachment == VK_ATTACHMENT_UNUSED) continue;
-            CheckDependencyExists(i, output_attachment_to_subpass[attachment], subpass_to_node, skip);
-            CheckDependencyExists(i, input_attachment_to_subpass[attachment], subpass_to_node, skip);
+            CheckDependencyExists(i, subpass.pColorAttachments[j].layout, output_attachment_to_subpass[attachment],
+                                  output_layout_to_subpass[attachment], subpass_to_node, skip);
+            CheckDependencyExists(i, subpass.pColorAttachments[j].layout, input_attachment_to_subpass[attachment],
+                                  input_layout_to_subpass[attachment], subpass_to_node, skip);
         }
         if (subpass.pDepthStencilAttachment && subpass.pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED) {
             const uint32_t &attachment = subpass.pDepthStencilAttachment->attachment;
-            CheckDependencyExists(i, output_attachment_to_subpass[attachment], subpass_to_node, skip);
-            CheckDependencyExists(i, input_attachment_to_subpass[attachment], subpass_to_node, skip);
+            CheckDependencyExists(i, subpass.pDepthStencilAttachment->layout, output_attachment_to_subpass[attachment],
+                                  output_layout_to_subpass[attachment], subpass_to_node, skip);
+            CheckDependencyExists(i, subpass.pDepthStencilAttachment->layout, input_attachment_to_subpass[attachment],
+                                  input_layout_to_subpass[attachment], subpass_to_node, skip);
         }
     }
     // Loop through implicit dependencies, if this pass reads make sure the attachment is preserved for all passes after it was

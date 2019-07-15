@@ -682,8 +682,10 @@ class CoreChecks : public ValidationStateTracker {
     bool ValidateFramebufferCreateInfo(const VkFramebufferCreateInfo* pCreateInfo);
     bool MatchUsage(uint32_t count, const VkAttachmentReference2KHR* attachments, const VkFramebufferCreateInfo* fbci,
                     VkImageUsageFlagBits usage_flag, const char* error_code);
-    bool CheckDependencyExists(const uint32_t subpass, const std::vector<uint32_t>& dependent_subpasses,
-                               const std::vector<DAGNode>& subpass_to_node, bool& skip);
+    bool IsImageLayoutReadOnly(VkImageLayout layout);
+    bool CheckDependencyExists(const uint32_t subpass, const VkImageLayout layout, const std::vector<uint32_t>& dependent_subpasses,
+                               const std::vector<VkImageLayout>& dependent_layouts, const std::vector<DAGNode>& subpass_to_node,
+                               bool& skip);
     bool CheckPreserved(const VkRenderPassCreateInfo2KHR* pCreateInfo, const int index, const uint32_t attachment,
                         const std::vector<DAGNode>& subpass_to_node, int depth, bool& skip);
     bool ValidateBindImageMemory(const VkBindImageMemoryInfo& bindInfo, const char* api_name);
@@ -1149,7 +1151,6 @@ class CoreChecks : public ValidationStateTracker {
 
     bool PreCallValidateCreateBuffer(VkDevice device, const VkBufferCreateInfo* pCreateInfo,
                                      const VkAllocationCallbacks* pAllocator, VkBuffer* pBuffer);
-
 
     bool PreCallValidateCreateBufferView(VkDevice device, const VkBufferViewCreateInfo* pCreateInfo,
                                          const VkAllocationCallbacks* pAllocator, VkBufferView* pView);
