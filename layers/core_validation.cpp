@@ -6952,13 +6952,16 @@ bool CoreChecks::PreCallValidateCmdBindIndexBuffer(VkCommandBuffer commandBuffer
 void CoreChecks::PreCallRecordCmdBindIndexBuffer(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
                                                  VkIndexType indexType) {
     auto buffer_state = GetBufferState(buffer);
-    auto cb_node = GetCBState(commandBuffer);
+    auto cb_state = GetCBState(commandBuffer);
 
-    cb_node->status |= CBSTATUS_INDEX_BUFFER_BOUND;
-    cb_node->index_buffer_binding.buffer = buffer;
-    cb_node->index_buffer_binding.size = buffer_state->createInfo.size;
-    cb_node->index_buffer_binding.offset = offset;
-    cb_node->index_buffer_binding.index_type = indexType;
+    cb_state->status |= CBSTATUS_INDEX_BUFFER_BOUND;
+    cb_state->index_buffer_binding.buffer = buffer;
+    cb_state->index_buffer_binding.size = buffer_state->createInfo.size;
+    cb_state->index_buffer_binding.offset = offset;
+    cb_state->index_buffer_binding.index_type = indexType;
+    // Add binding for this index buffer to this commandbuffer
+    cb_state->object_bindings.emplace(buffer, kVulkanObjectTypeBuffer);
+
 }
 
 bool CoreChecks::PreCallValidateCmdBindVertexBuffers(VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount,
