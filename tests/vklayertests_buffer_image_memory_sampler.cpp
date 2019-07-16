@@ -4500,7 +4500,7 @@ TEST_F(VkLayerTest, VertexBufferInvalid) {
         "Submit a command buffer using deleted vertex buffer, delete a buffer twice, use an invalid offset for each buffer type, "
         "and attempt to bind a null buffer");
 
-    const char *deleted_buffer_in_command_buffer = "UNASSIGNED-CoreValidation-DrawState-InvalidBuffer";
+    const char *deleted_buffer_in_command_buffer = "CoreValidation-DrawState-InvalidCommandBuffer-VkBuffer";
     const char *invalid_offset_message = "VUID-vkBindBufferMemory-memoryOffset-01036";
 
     ASSERT_NO_FATAL_FAILURE(Init());
@@ -4515,23 +4515,21 @@ TEST_F(VkLayerTest, VertexBufferInvalid) {
     m_commandBuffer->begin();
     m_commandBuffer->BeginRenderPass(m_renderPassBeginInfo);
     vkCmdBindPipeline(m_commandBuffer->handle(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipe.pipeline_);
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, deleted_buffer_in_command_buffer);
 
     {
-        // Create and bind a vertex buffer in a reduced scope, which will cause
-        // it to be deleted upon leaving this scope
+        // Create and bind a vertex buffer in a reduced scope, which will cause it to be deleted upon leaving this scope
         const float vbo_data[3] = {1.f, 0.f, 1.f};
         VkVerticesObj draw_verticies(m_device, 1, 1, sizeof(vbo_data[0]), sizeof(vbo_data) / sizeof(vbo_data[0]), vbo_data);
         draw_verticies.BindVertexBuffers(m_commandBuffer->handle());
         draw_verticies.AddVertexInputToPipeHelpr(&pipe);
+
+        m_commandBuffer->Draw(1, 0, 0, 0);
+
+        m_commandBuffer->EndRenderPass();
     }
 
-    m_commandBuffer->Draw(1, 0, 0, 0);
-
-    m_commandBuffer->EndRenderPass();
-    m_commandBuffer->end();
-
-    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, deleted_buffer_in_command_buffer);
-    m_commandBuffer->QueueCommandBuffer(false);
+    vkEndCommandBuffer(m_commandBuffer->handle());
     m_errorMonitor->VerifyFound();
 
     {
